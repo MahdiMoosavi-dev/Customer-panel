@@ -1,26 +1,24 @@
 {
   "name": "customer-panel",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "private": true,
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
+    "dev:frontend": "npm run dev -w frontend",
+    "dev:backend": "npm run start:dev -w backend",
+    "build": "npm run build --workspaces --if-present",
+    "build:frontend": "npm run build -w frontend",
+    "build:backend": "npm run build -w backend",
+    "start:frontend": "npm run start -w frontend",
+    "start:backend": "npm run start:prod -w backend",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
   },
-  "dependencies": {
-    "next": "16.3.1",
-    "react": "19.2.8",
-    "react-dom": "19.2.8"
-  },
-  "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.3.1",
-    "tailwindcss": "^4",
-    "typescript": "^5"
+  "engines": {
+    "node": ">=20.11"
   }
 }
