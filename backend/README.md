@@ -39,15 +39,65 @@ npm run prisma:studio         # browse the database in Prisma Studio
 | -------- | ----------------- | -------------- | ------------------------------------ | -------------------------------------------- |
 | `GET`    | `/api/greeting`   | —              | —                                    | `{ headline, message }`                      |
 | `POST`   | `/api/users`      | —              | `{ email, name, password }`          | `201` created user (no password)             |
-| `GET`    | `/api/users`      | Bearer token   | —                                    | `200` array of users                         |
+| `GET`    | `/api/users`      | Bearer token   | —                                    | `200` `{ items, total, page, pageSize }` — search, filter, sort, paginate (see below) |
 | `GET`    | `/api/users/:id`  | Bearer token   | —                                    | `200` a user, or `404`                       |
 | `PATCH`  | `/api/users/:id`  | —              | `{ email?, name?, password? }`       | `200` updated user, or `404`                 |
 | `DELETE` | `/api/users/:id`  | —              | —                                    | `204`, or `404`                              |
 | `POST`   | `/api/auth/login` | —              | `{ email, password }`                | `{ accessToken }`, or `401`                  |
+| `POST`   | `/api/products`   | Bearer token   | `{ title, shortDescription, longDescription, imageUrl, price, category }` | `201` created product, or `400`/`401` |
+| `GET`    | `/api/products`   | —              | —                                    | `200` `{ items, total, page, pageSize }` — search, sort, paginate (see below) |
+| `GET`    | `/api/products/:id` | —           | —                                    | `200` a product, or `404`                    |
+| `PATCH`  | `/api/products/:id` | Bearer token | `{ title?, shortDescription?, longDescription?, imageUrl?, price?, category? }` | `200` updated product, or `401`/`404` |
+| `DELETE` | `/api/products/:id` | Bearer token | —                                   | `204`, or `401`/`404` — also removes it from every cart |
+| `GET`    | `/api/cart`       | Bearer token   | —                                    | `200` the caller's cart items, enriched with product details |
+| `POST`   | `/api/cart/items` | Bearer token   | `{ productId, quantity? }`            | `201` the added/updated cart item, or `401`/`404` |
+| `DELETE` | `/api/cart/items/:productId` | Bearer token | —                         | `204`, or `401`/`404`                        |
 
-`POST /users` is the registration endpoint and stays open by design. Only the two `GET` routes are gated behind a JWT — `PATCH`/`DELETE` are not yet, which is a deliberate, documented gap; see [ADR-0013](../docs/08-decisions.md#adr-0013--jwt-guard-only-on-get-users-for-now).
+`POST /users` is the registration endpoint and stays open by design. Product browsing (`GET /products`, `GET /products/:id`) is public; every other mutating route above requires a bearer token. `PATCH`/`DELETE /users/:id` are still ungated, which is a deliberate, documented gap; see [ADR-0013](../docs/08-decisions.md#adr-0013--jwt-guard-only-on-get-users-for-now). There is likewise no admin/role system yet, so any logged-in user can create, edit, or delete *any* product — see [ADR-0018](../docs/08-decisions.md#adr-0018--products-and-cart-data-model-and-scope). Every `cart` route acts on the caller's own cart only — the user id comes from the verified token (`request.user.sub`), never from the body or a path param.
 
 A user record never serializes its password hash — see `UserDto` / `toUserDto`.
+
+### `GET /users` query parameters
+
+| Param         | Type                                          | Default     | Notes                                          |
+| ------------- | ---------------------------------------------- | ----------- | ------------------------------------------------ |
+| `page`        | integer ≥ 1                                    | `1`         |                                                    |
+| `pageSize`    | integer, 1–100                                 | `20`        | Requests above 100 are rejected with `400`, not silently capped. |
+| `search`      | string                                          | —           | Case-insensitive match against `name` **or** `email`. |
+| `createdFrom` | ISO 8601 date-time                              | —           | Inclusive lower bound on `createdAt`.            |
+| `createdTo`   | ISO 8601 date-time                              | —           | Inclusive upper bound on `createdAt`.            |
+| `sortBy`      | `name` \| `email` \| `createdAt` \| `updatedAt` | `createdAt` |                                                    |
+| `sortOrder`   | `asc` \| `desc`                                 | `asc`       |                                                    |
+
+An unknown `sortBy`/`sortOrder` value is rejected with `400` (`class-validator`'s `@IsIn`), not silently ignored. See [ADR-0017](../docs/08-decisions.md#adr-0017--search-filter-sort-and-pagination-on-get-users).
+
+### `GET /products` query parameters
+
+Same shape as `GET /users` (pattern 19 in [04-patterns](../docs/04-patterns.md)), minus a date filter — there was no obvious date-range filter to add for products, so none was built speculatively.
+
+| Param       | Type                                       | Default     | Notes                                 |
+| ----------- | -------------------------------------------- | ----------- | ---------------------------------------- |
+| `page`      | integer ≥ 1                                  | `1`         |                                            |
+| `pageSize`  | integer, 1–100                               | `20`        | Rejected with `400` above 100, not capped. |
+| `search`    | string                                        | —           | Case-insensitive match against `title` only — not `category` or the descriptions. |
+| `sortBy`    | `title` \| `price` \| `createdAt` \| `updatedAt` | `createdAt` |                                            |
+| `sortOrder` | `asc` \| `desc`                               | `asc`       |                                            |
+
+### Cart behavior
+
+- **Add** (`POST /cart/items`) is an upsert: a new `productId` creates a line at the given quantity (default `1`); an existing one **increments** by that amount. There is no endpoint to set an exact quantity — see [ADR-0018](../docs/08-decisions.md#adr-0018--products-and-cart-data-model-and-scope) for why, and what the follow-up would look like.
+- **Remove** (`DELETE /cart/items/:productId`) deletes the line entirely, regardless of quantity — it does not decrement by one.
+- Adding a `productId` that doesn't exist returns `404` before anything is written.
+- Deleting a product removes it from every cart that had it (`onDelete: Cascade` in [`schema.prisma`](prisma/schema.prisma)) — no cleanup use case needed.
+
+## API docs (Swagger / OpenAPI)
+
+```
+http://localhost:4000/docs         # interactive Swagger UI
+http://localhost:4000/docs-json    # the raw OpenAPI document
+```
+
+Every route, request body, and response shape is documented from the same request/response classes that already exist for validation — see [Documenting the API](#documenting-the-api) below. To call a protected route from the UI: `POST /users` → `POST /auth/login` to get a token → the **Authorize** button (top right) → paste the token (no `Bearer ` prefix, the UI adds it).
 
 ### Trying it from the command line
 
@@ -60,6 +110,16 @@ TOKEN=$(curl -s -X POST localhost:4000/api/auth/login -H 'Content-Type: applicat
   "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).accessToken))")
 
 curl localhost:4000/api/users -H "Authorization: Bearer $TOKEN"
+
+PRODUCT_ID=$(curl -s -X POST localhost:4000/api/products -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d \
+  '{"title":"Desk Lamp","shortDescription":"Warm LED","longDescription":"Dimmable, USB-C powered.","imageUrl":"https://example.com/lamp.jpg","price":29.99,"category":"Lighting"}' \
+  | node -e "process.stdin.on('data',d=>console.log(JSON.parse(d).id))")
+
+curl -X POST localhost:4000/api/cart/items -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d "{\"productId\":\"$PRODUCT_ID\"}"
+
+curl localhost:4000/api/cart -H "Authorization: Bearer $TOKEN"
 ```
 
 ## Structure
@@ -73,48 +133,93 @@ src/
 │   ├── domain/result.ts                       # Result<T, E> — errors as values
 │   ├── domain/app-error.ts                    # AppError hierarchy
 │   ├── domain/token.ts                        # TokenService port + TokenPayload — cross-cutting, see below
+│   ├── domain/pagination.ts                   # Paginated<T> + SortOrder — shared by any feature that paginates
 │   └── index.ts                               # public API → "@/core"
 ├── shared/
 │   ├── http/to-http-exception.ts               # AppError code → HTTP status
+│   ├── http/api-error-response.ts               # documents toHttpException's fixed error shape once
 │   ├── http/jwt-auth.guard.ts                  # @UseGuards(JwtAuthGuard) — verifies a bearer token
 │   ├── http/express.d.ts                       # augments Express.Request with `user?: TokenPayload`
 │   └── prisma/prisma.service.ts, prisma.module.ts   # @Global() — the one PrismaClient instance
 ├── features/greeting/                          # walking-skeleton reference feature — see docs/01-overview.md
-│   └── ...
+│   └── presentation/dto/greeting.response.ts    # @ApiProperty — documentation-only, implements GreetingDto
 ├── features/users/                             # User entity + CRUD
 │   ├── domain/
 │   │   ├── entities/user.ts                    # createUser() factory — normalizes + validates
 │   │   ├── repositories/user.repository.ts      # UserRepository port + USER_REPOSITORY token
 │   │   └── services/password-hasher.ts          # PasswordHasher port + PASSWORD_HASHER token
 │   ├── application/
-│   │   ├── dto/{user,create-user,update-user,credentials}.dto.ts
+│   │   ├── dto/{user,create-user,update-user,credentials,get-users-query}.dto.ts
 │   │   ├── mappers/user.mapper.ts                # strips passwordHash on the way out
 │   │   └── use-cases/
 │   │       ├── create-user.use-case.ts
-│   │       ├── get-users.use-case.ts
+│   │       ├── get-users.use-case.ts (+ .spec.ts)   # applies paging/sort defaults, caps pageSize at 100
 │   │       ├── get-user-by-id.use-case.ts
 │   │       ├── update-user.use-case.ts
 │   │       ├── delete-user.use-case.ts
 │   │       └── verify-user-credentials.use-case.ts   # exported for the auth feature — see below
 │   ├── infrastructure/
-│   │   ├── repositories/prisma-user.repository.ts
+│   │   ├── repositories/prisma-user.repository.ts   # findAll also builds the WHERE/ORDER BY/skip-take
 │   │   ├── services/bcrypt-password-hasher.ts
 │   │   └── users.module.ts                       # composition root
 │   ├── presentation/
-│   │   ├── dto/{create-user,update-user}.request.ts   # class-validator, implements the app-layer DTO
+│   │   ├── dto/{create-user,update-user}.request.ts   # class-validator + @ApiProperty, implements the app-layer DTO
+│   │   ├── dto/get-users.request.ts                    # class-validator only — no @ApiProperty, see below
+│   │   ├── dto/{user,get-users}.response.ts             # @ApiProperty-only, implements the app-layer DTO
 │   │   └── controllers/users.controller.ts
 │   └── index.ts                                  # public API → "@/features/users"
-└── features/auth/                               # login only — the JWT guard lives in shared/, not here
+├── features/auth/                               # login only — the JWT guard lives in shared/, not here
+│   ├── application/
+│   │   ├── dto/{login,auth-token}.dto.ts
+│   │   └── use-cases/login.use-case.ts            # depends on users' VerifyUserCredentialsUseCase
+│   ├── infrastructure/
+│   │   ├── services/jwt-token.service.ts           # implements TokenService with @nestjs/jwt
+│   │   └── auth.module.ts                          # @Global() composition root
+│   ├── presentation/
+│   │   ├── dto/login.request.ts, auth-token.response.ts
+│   │   └── controllers/auth.controller.ts
+│   └── index.ts                                    # public API → "@/features/auth"
+├── features/products/                           # Product entity + CRUD; GET routes public, mutations gated
+│   ├── domain/
+│   │   ├── entities/product.ts                    # createProduct() factory — normalizes + validates
+│   │   └── repositories/product.repository.ts      # ProductRepository port + PRODUCT_REPOSITORY token
+│   ├── application/
+│   │   ├── dto/{product,create-product,update-product,get-products-query}.dto.ts
+│   │   ├── mappers/product.mapper.ts
+│   │   └── use-cases/
+│   │       ├── create-product.use-case.ts (+ .spec.ts)
+│   │       ├── get-products.use-case.ts (+ .spec.ts)
+│   │       ├── get-product-by-id.use-case.ts
+│   │       ├── get-products-by-ids.use-case.ts (+ .spec.ts)   # exported for the cart feature
+│   │       ├── update-product.use-case.ts
+│   │       └── delete-product.use-case.ts
+│   ├── infrastructure/
+│   │   ├── repositories/prisma-product.repository.ts
+│   │   └── products.module.ts                      # composition root
+│   ├── presentation/
+│   │   ├── dto/{create-product,update-product}.request.ts
+│   │   ├── dto/get-products.request.ts              # class-validator only, same reason as get-users.request.ts
+│   │   ├── dto/{product,get-products}.response.ts
+│   │   └── controllers/products.controller.ts
+│   └── index.ts                                    # public API → "@/features/products"
+└── features/cart/                               # every route requires a token, scoped to request.user.sub
+    ├── domain/
+    │   ├── entities/cart-item.ts
+    │   └── repositories/cart.repository.ts          # CartRepository port + CART_REPOSITORY token
     ├── application/
-    │   ├── dto/{login,auth-token}.dto.ts
-    │   └── use-cases/login.use-case.ts            # depends on users' VerifyUserCredentialsUseCase
+    │   ├── dto/{cart-item,add-cart-item}.dto.ts
+    │   ├── mappers/cart-item.mapper.ts              # combines a CartItem with products' ProductDto
+    │   └── use-cases/
+    │       ├── get-cart.use-case.ts (+ .spec.ts)        # depends on products' GetProductsByIdsUseCase
+    │       ├── add-cart-item.use-case.ts (+ .spec.ts)   # depends on products' GetProductByIdUseCase
+    │       └── remove-cart-item.use-case.ts (+ .spec.ts)
     ├── infrastructure/
-    │   ├── services/jwt-token.service.ts           # implements TokenService with @nestjs/jwt
-    │   └── auth.module.ts                          # @Global() composition root
+    │   ├── repositories/prisma-cart.repository.ts   # upsert-with-increment for add, delete for remove
+    │   └── cart.module.ts                            # imports ProductsModule; composition root
     ├── presentation/
-    │   ├── dto/login.request.ts
-    │   └── controllers/auth.controller.ts
-    └── index.ts                                    # public API → "@/features/auth"
+    │   ├── dto/add-cart-item.request.ts, cart-item.response.ts
+    │   └── controllers/cart.controller.ts
+    └── index.ts                                      # public API → "@/features/cart"
 
 prisma/
 ├── schema.prisma                                 # models — no datasource url (Prisma 7, see below)
@@ -146,6 +251,8 @@ export { VerifyUserCredentialsUseCase } from './application/use-cases/verify-use
 ```
 
 `AuthModule` imports `UsersModule` and injects that use case into `LoginUseCase`. Auth never sees a password hash or a repository — it only knows "ask users whether these credentials are valid."
+
+The `cart` feature is the second example of this shape: it needs to confirm a product exists and to fetch product details, but never sees a `ProductRepository`. `products/index.ts` exports `GetProductByIdUseCase` and `GetProductsByIdsUseCase`; `CartModule` imports `ProductsModule` and injects them into `AddCartItemUseCase` and `GetCartUseCase` respectively, the same `useFactory` + `inject` shape `AuthModule` uses for `LoginUseCase`.
 
 ## The JWT guard lives in `shared/`, not in `features/auth/`
 
@@ -198,6 +305,29 @@ export class CreateUserRequest implements CreateUserDto {
 
 A global `ValidationPipe({ whitelist, forbidNonWhitelisted, transform })` in [main.ts](src/main.ts) enforces every request DTO.
 
+## Documenting the API
+
+`@nestjs/swagger` builds the OpenAPI document from decorators, and decorators only work on runtime classes — but `application/dto/*.dto.ts` are deliberately plain interfaces (erased at compile time, so Swagger can't introspect them). Request bodies already had a class for this (`presentation/dto/*.request.ts`, for `class-validator`); responses get the same treatment, one level further out:
+
+```ts
+// application/dto/user.dto.ts — framework-free, unchanged
+export interface UserDto { readonly id: string; ... }
+
+// presentation/dto/user.response.ts — documentation-only
+export class UserResponse implements UserDto {
+  @ApiProperty({ example: '81c00...' }) id!: string;
+  ...
+}
+```
+
+`implements UserDto` is what keeps it honest — the response class fails to compile if the application DTO's shape changes underneath it. The controller still returns the plain interface value; `@ApiResponse({ type: UserResponse })` only tells Swagger which schema to render, it has no effect on what's actually serialized.
+
+Error bodies are documented once, not per endpoint — [`ApiErrorResponse`](src/shared/http/api-error-response.ts) mirrors the fixed `{ statusCode, code, message }` shape `toHttpException` always produces, and every `@ApiResponse` for a failure case points at it.
+
+**Query-string DTOs are the one exception to "decorate the class."** `@nestjs/swagger` reads `@ApiProperty` off a class automatically for `@Body()` parameters, but not for `@Query()` ones — without the (deliberately unused, see [05-technologies](../docs/05-technologies.md)) CLI plugin, a `@Query() query: GetUsersRequest` parameter renders nothing in Swagger UI. [`GetUsersRequest`](src/features/users/presentation/dto/get-users.request.ts) therefore carries only `class-validator` decorators; each param is documented instead with an explicit `@ApiQuery({ name: ... })` on the controller method, the same way `@ApiParam` already documents `:id`.
+
+`main.ts` builds the document with `DocumentBuilder().addBearerAuth(..., 'access-token')`; a controller method marks itself protected with `@ApiBearerAuth('access-token')` — kept in sync by hand with `@UseGuards(JwtAuthGuard)`, since Swagger has no way to detect a guard's meaning from the class alone.
+
 ## Adding a feature
 
 ```
@@ -205,7 +335,7 @@ src/features/<name>/
   domain/         entities, value objects, repository/service interfaces + tokens
   application/    use cases, DTOs, mappers
   infrastructure/ repository/service implementations, <name>.module.ts
-  presentation/   controllers, request DTOs
+  presentation/   controllers, request DTOs (+ @ApiProperty), response DTOs for Swagger
   index.ts        export the module and whatever types callers need
 ```
 

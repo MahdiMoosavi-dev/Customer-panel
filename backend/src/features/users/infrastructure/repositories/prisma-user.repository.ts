@@ -7,12 +7,14 @@ import {
   ok,
   UnexpectedError,
   type AppError,
+  type Paginated,
   type Result,
 } from '@/core';
 import { PrismaService } from '@/shared/prisma/prisma.service';
 import type { NewUser, User } from '../../domain/entities/user';
 import type {
   UserChanges,
+  UserListQuery,
   UserRepository,
 } from '../../domain/repositories/user.repository';
 
@@ -56,12 +58,50 @@ export class PrismaUserRepository implements UserRepository {
     }
   }
 
-  async findAll(): Promise<Result<User[], AppError>> {
+  async findAll(
+    query: UserListQuery,
+  ): Promise<Result<Paginated<User>, AppError>> {
     try {
-      const records = await this.prisma.user.findMany({
-        orderBy: { createdAt: 'asc' },
+      const conditions: Prisma.UserWhereInput[] = [];
+
+      if (query.search) {
+        conditions.push({
+          OR: [
+            { name: { contains: query.search, mode: 'insensitive' } },
+            { email: { contains: query.search, mode: 'insensitive' } },
+          ],
+        });
+      }
+
+      if (query.createdFrom || query.createdTo) {
+        conditions.push({
+          createdAt: {
+            ...(query.createdFrom ? { gte: query.createdFrom } : {}),
+            ...(query.createdTo ? { lte: query.createdTo } : {}),
+          },
+        });
+      }
+
+      const where: Prisma.UserWhereInput | undefined = conditions.length
+        ? { AND: conditions }
+        : undefined;
+
+      const [records, total] = await Promise.all([
+        this.prisma.user.findMany({
+          where,
+          orderBy: { [query.sortBy]: query.sortOrder },
+          skip: (query.page - 1) * query.pageSize,
+          take: query.pageSize,
+        }),
+        this.prisma.user.count({ where }),
+      ]);
+
+      return ok({
+        items: records.map(toUser),
+        total,
+        page: query.page,
+        pageSize: query.pageSize,
       });
-      return ok(records.map(toUser));
     } catch (cause) {
       return err(new UnexpectedError('Could not list users.', { cause }));
     }

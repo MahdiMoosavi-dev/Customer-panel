@@ -1,6 +1,6 @@
 # 02 — Architecture
 
-> Last updated: 2026-08-16
+> Last updated: 2026-08-16 (core/ now also has Paginated<T>, used by GET /users)
 
 ## The idea in one paragraph
 
@@ -17,7 +17,7 @@ The application is cut **vertically into features**, and each feature is cut **h
 
 Two folders sit outside the features:
 
-- **`core/`** — framework-agnostic primitives every feature may use: `Result`, `AppError`, `env`. It is the innermost thing in the codebase and depends on nothing.
+- **`core/`** — framework-agnostic primitives every feature may use: `Result`, `AppError`, `env`, and, on the backend, `Paginated<T>` for list endpoints. It is the innermost thing in the codebase and depends on nothing.
 - **`shared/`** — reusable, feature-agnostic *outer-layer* code: UI primitives and helpers on the frontend (`shared/ui`, `shared/lib`), HTTP translation on the backend (`shared/http`). Unlike `core/`, `shared/` is allowed to know about the framework.
 
 ## The dependency rule

@@ -1,6 +1,6 @@
 # 04 — Patterns
 
-> Last updated: 2026-08-16 (added: cross-feature use cases, shared guards, request-DTO validation, Prisma error translation)
+> Last updated: 2026-08-16 (added: cross-feature use cases, shared guards, request-DTO validation, Prisma error translation, response DTOs for Swagger, generic pagination + query DTOs; products/cart as a second cross-feature-use-case example)
 
 The recurring patterns in this codebase, each with what it is, why it is here, and when *not* to reach for it. Code samples are trimmed for shape — the files linked from each section are the source of truth.
 
@@ -230,7 +230,9 @@ export { VerifyUserCredentialsUseCase } from './application/use-cases/verify-use
 
 `auth`'s `LoginUseCase` takes a `VerifyUserCredentialsUseCase` in its constructor and calls `.execute({ email, password })`. It never sees a `UserRepository`, a `PasswordHasher`, or a password hash.
 
-**Why.** This is the feature-level version of ports and adapters: `users` decides how credential verification works (repository lookup, hash comparison, normalizing "no such user" and "wrong password" into the same generic failure) and publishes only the capability, not the mechanism. `auth` depends on a capability it can't misuse.
+`cart` → `products` is the second occurrence of this shape, not a one-off: `products/index.ts` exports `GetProductByIdUseCase` (does this product exist?) and `GetProductsByIdsUseCase` (enrich these cart rows with product details), and `CartModule` imports `ProductsModule` to inject them into `AddCartItemUseCase` and `GetCartUseCase`. `cart` never sees a `ProductRepository` or a Prisma model.
+
+**Why.** This is the feature-level version of ports and adapters: `users` decides how credential verification works (repository lookup, hash comparison, normalizing "no such user" and "wrong password" into the same generic failure) and publishes only the capability, not the mechanism. `auth` depends on a capability it can't misuse. Same reasoning for `products`/`cart`: `cart` needs "does this product exist" and "what does it look like," not "how are products stored."
 
 **When not to.** If two features want the *same* primitive (not a capability one owns), that is a `core/` or `shared/` candidate instead — see pattern 12 and [ADR-0008](08-decisions.md#adr-0008--duplicate-core-primitives-instead-of-a-shared-package).
 
@@ -290,3 +292,69 @@ A global `ValidationPipe({ whitelist, forbidNonWhitelisted, transform })` in `ma
 **Why.** This is pattern 6 (the error taxonomy) applied at a concrete adapter: the caller asked "does this email already exist?", not "what did the Postgres driver throw?" Translating by code, not by string-matching a message, survives Prisma version bumps and localized error text.
 
 **When not to.** Don't special-case every Prisma error code you can imagine — only the ones a caller can meaningfully react to differently. Everything else is legitimately `UnexpectedError`.
+
+---
+
+## 18. Response DTOs mirror request DTOs, for the same reason
+
+**What.** Just as `presentation/dto/*.request.ts` classes exist because `class-validator` decorators can't live on a framework-free application DTO, `presentation/dto/*.response.ts` classes exist because `@ApiProperty()` can't either. Both `implements` the same application-layer interface:
+
+```ts
+// application/dto/user.dto.ts — framework-free, one definition of the shape
+export interface UserDto {
+  readonly id: string;
+  readonly email: string;
+  ...
+}
+
+// presentation/dto/user.response.ts — documentation-only, no validation
+export class UserResponse implements UserDto {
+  @ApiProperty({ example: '81c00...' }) id!: string;
+  @ApiProperty({ example: 'ada@example.com' }) email!: string;
+  ...
+}
+```
+
+The controller keeps returning the plain `UserDto` value from the use case — `@ApiResponse({ type: UserResponse })` only tells Swagger which schema to render for that status code; it has no effect on what actually gets serialized over the wire.
+
+**Why.** An interface is erased at compile time, so `@nestjs/swagger`'s reflection-based decorators have nothing to introspect. The alternative — converting application DTOs to classes so they can carry `@ApiProperty()` directly — would pull `@nestjs/swagger` into `application/`, which the layering rule forbids for exactly the reason pattern 16 gives for `class-validator`. Duplicating the shape one layer out, with the compiler enforcing the two stay in sync via `implements`, costs one small file per DTO and keeps `application/` genuinely framework-free.
+
+**Error responses don't get this treatment per endpoint.** `toHttpException` always produces the same `{ statusCode, code, message }` shape regardless of which `AppError` triggered it, so there is exactly one class for it — [`ApiErrorResponse`](../backend/src/shared/http/api-error-response.ts) — that every `@ApiResponse` for a failure case points at, rather than a bespoke error-response class per feature.
+
+**When not to.** If a project adopts the `@nestjs/swagger` CLI plugin (static analysis at build time, configured in `nest-cli.json`), it can often infer property metadata directly from interfaces and controller return types, making manual response classes unnecessary. This project doesn't use the plugin, to keep the build a single `tsc` pass — but it's the natural next step if the manual-decoration boilerplate starts to hurt.
+
+---
+
+## 19. List endpoints: a generic `Paginated<T>`, a feature-specific query, `@ApiQuery` instead of `@ApiProperty`
+
+**What.** `GET /users` (see [`get-users.use-case.ts`](../backend/src/features/users/application/use-cases/get-users.use-case.ts), [`prisma-user.repository.ts`](../backend/src/features/users/infrastructure/repositories/prisma-user.repository.ts)) is the house shape for "list with search, filter, sort, and pagination":
+
+```ts
+// core/domain/pagination.ts — generic, framework-free, any feature can return one
+export interface Paginated<T> {
+  readonly items: readonly T[];
+  readonly total: number;
+  readonly page: number;
+  readonly pageSize: number;
+}
+
+// features/users/domain/repositories/user.repository.ts — feature-specific query shape
+export interface UserListQuery {
+  readonly page: number;
+  readonly pageSize: number;
+  readonly search?: string;         // matched against name OR email
+  readonly createdFrom?: Date;      // a genuine filter, distinct from search
+  readonly createdTo?: Date;
+  readonly sortBy: UserSortField;   // a closed enum of sortable columns, not a free string
+  readonly sortOrder: SortOrder;
+}
+findAll(query: UserListQuery): Promise<Result<Paginated<User>, AppError>>;
+```
+
+`Paginated<T>` lives in `core/` because the envelope has zero user-specific fields — the next feature that lists something reuses it rather than reinventing the same four properties. `UserListQuery` stays in the feature, because *which* columns are sortable and *what* counts as a filter is feature-specific.
+
+**Where defaults and clamping live.** The use case, not the controller: `GetUsersUseCase.execute()` takes an all-optional `GetUsersQueryDto` and fills in `page: 1`, `pageSize: 20` (capped at 100), `sortBy: 'createdAt'`, `sortOrder: 'asc'` before calling the repository. This keeps `execute({})` meaningful when a test (or a future caller) calls the use case directly, without going through HTTP. The presentation-layer `GetUsersRequest` (pattern 16) still separately rejects an out-of-range `pageSize` or an unrecognized `sortBy` with `400` — the use case's clamp is a defense-in-depth default, not the primary validation.
+
+**Why `@ApiQuery` instead of `@ApiProperty` here.** Pattern 16 and 18 use `@ApiProperty()` on request/response classes because `@nestjs/swagger` reflects those automatically for `@Body()` parameters and return types. It does **not** do the same for a class bound with `@Query()` — without the CLI plugin (see [05-technologies](05-technologies.md)), decorating `GetUsersRequest`'s fields with `@ApiProperty()` would be dead code. Each query param is documented instead with its own `@ApiQuery({ name: 'page', ... })` on the controller method, the same manual treatment `:id` already gets from `@ApiParam`.
+
+**When not to.** Don't reach for `createdFrom`/`createdTo`-style filters for every column just because the pattern exists — add a filter when there's a real caller need for it, the same restraint pattern 17 applies to Prisma error codes. See [ADR-0017](08-decisions.md#adr-0017--search-filter-sort-and-pagination-on-get-users) for the specific defaults and why they're what they are.

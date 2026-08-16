@@ -28,7 +28,11 @@ function fakeRepository(
         User,
         AppError
       >),
-    findAll: () => Promise.resolve({ ok: true, value: [] }),
+    findAll: () =>
+      Promise.resolve({
+        ok: true,
+        value: { items: [], total: 0, page: 1, pageSize: 20 },
+      }),
     findById: () =>
       Promise.resolve({
         ok: false,

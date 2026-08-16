@@ -1,6 +1,6 @@
 # 03 — Project structure
 
-> Last updated: 2026-08-16 (backend: users + auth features, Prisma, Docker)
+> Last updated: 2026-08-16 (backend: users + auth features, Prisma, Docker, Swagger/OpenAPI; GET /users search/filter/sort/pagination; products + cart features)
 
 ## The monorepo
 
@@ -97,17 +97,19 @@ backend/
     │   ├── domain/result.ts
     │   ├── domain/app-error.ts                  + ConflictError, UnauthorizedError
     │   ├── domain/token.ts                       TokenService port + TokenPayload + TOKEN_SERVICE — cross-cutting, not auth-specific
+    │   ├── domain/pagination.ts                  Paginated<T> + SortOrder — any feature that paginates uses this shape
     │   └── index.ts
     │
     ├── shared/
     │   ├── http/to-http-exception.ts            AppError code ➜ HTTP status
+    │   ├── http/api-error-response.ts            @ApiProperty-decorated { statusCode, code, message } — one class, every error response points at it
     │   ├── http/jwt-auth.guard.ts                @UseGuards(JwtAuthGuard) — any feature can use this
     │   ├── http/express.d.ts                     augments Express.Request.user: TokenPayload
     │   └── prisma/prisma.service.ts, prisma.module.ts   @Global() — the one PrismaClient instance
     │
     └── features/
-        ├── greeting/                             unchanged — see docs/01-overview.md
-        │   └── ...
+        ├── greeting/                             unchanged, plus:
+        │   └── presentation/dto/greeting.response.ts   @ApiProperty-only, implements GreetingDto
         │
         ├── users/
         │   ├── domain/
@@ -115,35 +117,80 @@ backend/
         │   │   ├── repositories/user.repository.ts             UserRepository port + USER_REPOSITORY token
         │   │   └── services/password-hasher.ts                 PasswordHasher port + PASSWORD_HASHER token
         │   ├── application/
-        │   │   ├── dto/{user,create-user,update-user,credentials}.dto.ts
+        │   │   ├── dto/{user,create-user,update-user,credentials,get-users-query}.dto.ts
         │   │   ├── mappers/user.mapper.ts                      strips passwordHash
         │   │   └── use-cases/
         │   │       ├── create-user.use-case.ts (+ .spec.ts)
-        │   │       ├── get-users.use-case.ts
+        │   │       ├── get-users.use-case.ts (+ .spec.ts)      applies page/sort defaults, caps pageSize at 100
         │   │       ├── get-user-by-id.use-case.ts
         │   │       ├── update-user.use-case.ts
         │   │       ├── delete-user.use-case.ts
         │   │       └── verify-user-credentials.use-case.ts (+ .spec.ts)   exported for `auth`
         │   ├── infrastructure/
-        │   │   ├── repositories/prisma-user.repository.ts       maps Prisma P2002/P2025 → ConflictError/NotFoundError
+        │   │   ├── repositories/prisma-user.repository.ts       maps Prisma P2002/P2025 → ConflictError/NotFoundError; findAll builds WHERE/ORDER BY/skip-take
         │   │   ├── services/bcrypt-password-hasher.ts
         │   │   └── users.module.ts                              composition root
         │   ├── presentation/
-        │   │   ├── dto/{create-user,update-user}.request.ts     class-validator, implements the app DTO
+        │   │   ├── dto/{create-user,update-user}.request.ts     class-validator + @ApiProperty, implements the app DTO
+        │   │   ├── dto/get-users.request.ts                      class-validator only — query DTOs don't get @ApiProperty, see docs/05-technologies.md
+        │   │   ├── dto/{user,get-users}.response.ts               @ApiProperty-only, implements the app DTO
         │   │   └── controllers/users.controller.ts
         │   └── index.ts                                         exports UsersModule, VerifyUserCredentialsUseCase, UserDto
         │
-        └── auth/                                 no domain/ of its own — TokenService lives in core/, see above
+        ├── auth/                                 no domain/ of its own — TokenService lives in core/, see above
+        │   ├── application/
+        │   │   ├── dto/{login,auth-token}.dto.ts
+        │   │   └── use-cases/login.use-case.ts                   depends on users' VerifyUserCredentialsUseCase
+        │   ├── infrastructure/
+        │   │   ├── services/jwt-token.service.ts                 implements core's TokenService with @nestjs/jwt
+        │   │   └── auth.module.ts                                @Global() composition root
+        │   ├── presentation/
+        │   │   ├── dto/login.request.ts, auth-token.response.ts
+        │   │   └── controllers/auth.controller.ts
+        │   └── index.ts                                          exports AuthModule, AuthTokenDto — not the guard, see below
+        │
+        ├── products/
+        │   ├── domain/
+        │   │   ├── entities/product.ts                          Product, NewProduct + createProduct() invariants
+        │   │   └── repositories/product.repository.ts             ProductRepository port + PRODUCT_REPOSITORY token
+        │   ├── application/
+        │   │   ├── dto/{product,create-product,update-product,get-products-query}.dto.ts
+        │   │   ├── mappers/product.mapper.ts
+        │   │   └── use-cases/
+        │   │       ├── create-product.use-case.ts (+ .spec.ts)
+        │   │       ├── get-products.use-case.ts (+ .spec.ts)      search/sort/pagination — same shape as GET /users
+        │   │       ├── get-product-by-id.use-case.ts
+        │   │       ├── get-products-by-ids.use-case.ts (+ .spec.ts)   exported for `cart`
+        │   │       ├── update-product.use-case.ts
+        │   │       └── delete-product.use-case.ts
+        │   ├── infrastructure/
+        │   │   ├── repositories/prisma-product.repository.ts
+        │   │   └── products.module.ts                            composition root
+        │   ├── presentation/
+        │   │   ├── dto/{create-product,update-product}.request.ts
+        │   │   ├── dto/get-products.request.ts                    class-validator only, see docs/05-technologies.md
+        │   │   ├── dto/{product,get-products}.response.ts
+        │   │   └── controllers/products.controller.ts             GET routes public, mutations behind JwtAuthGuard
+        │   └── index.ts                                          exports ProductsModule, GetProductByIdUseCase, GetProductsByIdsUseCase, ProductDto
+        │
+        └── cart/                                 no domain/entities beyond CartItem — a cart is just its line items
+            ├── domain/
+            │   ├── entities/cart-item.ts
+            │   └── repositories/cart.repository.ts                 CartRepository port + CART_REPOSITORY token
             ├── application/
-            │   ├── dto/{login,auth-token}.dto.ts
-            │   └── use-cases/login.use-case.ts                   depends on users' VerifyUserCredentialsUseCase
+            │   ├── dto/{cart-item,add-cart-item}.dto.ts
+            │   ├── mappers/cart-item.mapper.ts                    combines a CartItem with a products' ProductDto
+            │   └── use-cases/
+            │       ├── get-cart.use-case.ts (+ .spec.ts)           depends on products' GetProductsByIdsUseCase
+            │       ├── add-cart-item.use-case.ts (+ .spec.ts)      depends on products' GetProductByIdUseCase
+            │       └── remove-cart-item.use-case.ts (+ .spec.ts)
             ├── infrastructure/
-            │   ├── services/jwt-token.service.ts                 implements core's TokenService with @nestjs/jwt
-            │   └── auth.module.ts                                @Global() composition root
+            │   ├── repositories/prisma-cart.repository.ts          upsert-with-increment for add, delete for remove
+            │   └── cart.module.ts                                  imports ProductsModule, composition root
             ├── presentation/
-            │   ├── dto/login.request.ts
-            │   └── controllers/auth.controller.ts
-            └── index.ts                                          exports AuthModule, AuthTokenDto — not the guard, see below
+            │   ├── dto/add-cart-item.request.ts, cart-item.response.ts
+            │   └── controllers/cart.controller.ts                  every route behind JwtAuthGuard, scoped to request.user.sub
+            └── index.ts                                            exports CartModule
 ```
 
 Note the deliberate symmetry between `greeting` and `users`: the two `features/*/` trees differ only where the runtime forces them to. `auth` breaks the pattern in one place on purpose — it has no `domain/` folder, because its one domain concept (the token contract) turned out to be cross-cutting enough to live in `core/` instead. See [backend/README.md](../backend/README.md#the-jwt-guard-lives-in-shared-not-in-featuresauth) and [ADR-0012](08-decisions.md#adr-0012--the-jwt-guard-lives-in-shared-not-in-the-auth-feature) for why — it's not a shortcut, it's what fixed a real circular-import bug.
@@ -162,6 +209,7 @@ Note the deliberate symmetry between `greeting` and `users`: the two `features/*
 | A React component two features both need                  | `frontend/src/shared/ui/`                                              |
 | A controller / route handler                              | `features/<name>/presentation/controllers/`                            |
 | A validated HTTP request body                              | `features/<name>/presentation/dto/*.request.ts` — `implements` the application DTO |
+| A documented response shape (for Swagger)                  | `features/<name>/presentation/dto/*.response.ts` — `implements` the application DTO, `@ApiProperty` only, no validation |
 | A helper every feature may use, with no framework in it    | `core/`                                                                |
 | A helper every feature may use, that touches the framework | `shared/`                                                              |
 | A guard, interceptor, or pipe more than one feature attaches | `shared/http/` — never inside one feature, or a second feature importing it can create a circular module dependency (it happened — see [ADR-0012](08-decisions.md#adr-0012--the-jwt-guard-lives-in-shared-not-in-the-auth-feature)) |

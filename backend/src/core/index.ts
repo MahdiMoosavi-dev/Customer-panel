@@ -8,6 +8,7 @@ export {
   ValidationError,
 } from './domain/app-error';
 export { err, isOk, mapResult, ok, type Result } from './domain/result';
+export { type Paginated, type SortOrder } from './domain/pagination';
 export {
   TOKEN_SERVICE,
   type TokenPayload,

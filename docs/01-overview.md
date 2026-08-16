@@ -1,6 +1,6 @@
 # 01 — Overview
 
-> Last updated: 2026-08-16
+> Last updated: 2026-08-16 (added: products + cart features)
 
 ## What this project is
 
@@ -30,8 +30,11 @@ The frontend is still the walking skeleton described below. The backend has grow
 - `GET /api/greeting` — the original walking-skeleton feature, unchanged.
 - A `users` feature — full CRUD on a Postgres-backed `User` entity via Prisma, DTOs that never expose the password hash, and a `VerifyUserCredentialsUseCase` exported for other features to depend on (used by `auth`, without exposing the repository or hasher).
 - An `auth` feature — `POST /auth/login` issues a JWT. `GET /users` and `GET /users/:id` are gated behind it via `JwtAuthGuard`. See [backend/README.md](../backend/README.md#the-jwt-guard-lives-in-shared-not-in-featuresauth) for why the guard lives in `shared/http/`, not inside `features/auth/`.
-- A real database: Postgres 17 in Docker ([backend/docker-compose.yml](../backend/docker-compose.yml)), Prisma 7 as the ORM, one migration (`users` table).
+- A `products` feature — full CRUD on a Postgres-backed `Product` entity (title, descriptions, image URL, price, category). Browsing (`GET /products`, `GET /products/:id`) is public and supports the same search/sort/pagination shape as `GET /users`; mutations require a bearer token. Exports `GetProductByIdUseCase` and `GetProductsByIdsUseCase` for other features to depend on.
+- A `cart` feature — every user has one implicit cart, modeled as line items (`CartItem`, unique per user+product). `GET /cart`, `POST /cart/items` (add or increment quantity), and `DELETE /cart/items/:productId` are all gated behind `JwtAuthGuard` and always act on the caller's own cart. Depends on `products`' exported use cases rather than a `ProductRepository` of its own — see [04-patterns](04-patterns.md#14-cross-feature-composition-through-a-purpose-built-use-case).
+- A real database: Postgres 17 in Docker ([backend/docker-compose.yml](../backend/docker-compose.yml)), Prisma 7 as the ORM, migrations for `users`, `products`, and `cart_items` (the last two cascade-delete on their parent user/product).
 - Request validation via `class-validator` DTOs and a global `ValidationPipe`.
+- Live API docs at `GET /docs` (Swagger UI) and `GET /docs-json` (the raw OpenAPI document) — every route, request, and response is documented from decorated classes, including which routes require a bearer token. See [backend/README.md](../backend/README.md#api-docs-swagger--openapi).
 
 **Tooling** — npm workspaces with one lockfile; TypeScript strict on both sides; ESLint with architecture boundary rules that fail the build on a layering violation; Jest unit + e2e tests on the backend (e2e now requires the database to be up, since `PrismaService` connects eagerly on module init).
 
@@ -47,7 +50,7 @@ Knowing the gaps is as useful as knowing the contents. None of the following exi
 
 | Missing                          | Notes                                                                                              |
 | -------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Authorization beyond "logged in" | The JWT guard proves a request carries a valid token; nothing yet checks roles, ownership, or permissions. `PATCH`/`DELETE /users/:id` are not gated at all — see [ADR-0013](08-decisions.md#adr-0013--jwt-guard-only-on-get-users-for-now). |
+| Authorization beyond "logged in" | The JWT guard proves a request carries a valid token; nothing yet checks roles, ownership, or permissions. `PATCH`/`DELETE /users/:id` are not gated at all; any logged-in user can create/edit/delete *any* product, not just their own — see [ADR-0013](08-decisions.md#adr-0013--jwt-guard-only-on-get-users-for-now) and [ADR-0018](08-decisions.md#adr-0018--products-and-cart-data-model-and-scope). |
 | Refresh tokens / logout          | `POST /auth/login` issues an access token only. No refresh flow, no revocation, no token blacklist.  |
 | Frontend → backend wiring        | The frontend renders from its own static adapter, so it runs standalone. See [07-workflows](07-workflows.md#connect-the-frontend-to-the-backend). |
 | A shared package                 | `core/` (`Result`, `AppError`, and now `TokenService`) is duplicated in both apps on purpose — see [ADR-0008](08-decisions.md#adr-0008--duplicate-core-primitives-instead-of-a-shared-package). |
@@ -55,6 +58,7 @@ Knowing the gaps is as useful as knowing the contents. None of the following exi
 | CI / CD, deployment, containers  | No pipeline beyond local Docker Compose for Postgres, no deployment environments.                    |
 | Observability                    | Nest's default logger only. No metrics, tracing, or error reporting.                                |
 | Rate limiting                    | `POST /auth/login` and `POST /users` have no throttling — brute-forcing credentials or spamming registrations is currently unmitigated. |
+| Swagger UI is unauthenticated     | `GET /docs` and `/docs-json` are reachable by anyone who can reach the API — fine for local/internal use, worth gating (e.g. behind `CORS_ORIGIN`-style env check, or removing in production) before a public deployment. |
 
 ## Where to go next
 

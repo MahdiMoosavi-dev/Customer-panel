@@ -1,6 +1,6 @@
 # Changelog
 
-> Last updated: 2026-08-16 (Postgres + Prisma, users CRUD, JWT auth)
+> Last updated: 2026-08-16 (products + cart features; GET /users search/filter/sort/pagination; Postgres + Prisma, users CRUD, JWT auth)
 
 One entry per working session, newest first. This is a log of **what changed in the project**, not a release changelog — it exists so the next person can see how the codebase got to its current shape without reading every commit.
 
@@ -14,6 +14,30 @@ One entry per working session, newest first. This is a log of **what changed in 
 **Docs** — which docs were updated (or "none needed", and why).
 **Verified** — the checks that were actually run.
 ```
+
+---
+
+## 2026-08-16 — Products and cart features
+
+**Changed** — Added a `products` feature: a Postgres-backed `Product` entity (`title`, `shortDescription`, `longDescription`, `imageUrl`, `price`, `category`) with full CRUD. `GET /products` (search on `title`, sort by `title`/`price`/`createdAt`/`updatedAt`, paginated) and `GET /products/:id` are public; `POST`/`PATCH`/`DELETE /products/:id` require a bearer token. Reuses the `Paginated<T>` + search/sort/pagination shape built for `GET /users` (pattern 19). Added a `cart` feature: every route (`GET /cart`, `POST /cart/items`, `DELETE /cart/items/:productId`) sits behind `JwtAuthGuard` and always acts on the caller's own cart (`request.user.sub`), never a param. A cart is modeled as `CartItem` rows (`userId`, `productId`, `quantity`, unique per pair) rather than a separate `Cart` entity; adding an already-present product increments its quantity via a Prisma `upsert`, removing deletes the row entirely. Both new Prisma models cascade-delete through their `User`/`Product` relations, so deleting either cleans up cart rows automatically. `cart`'s use cases depend on two new use cases `products` exports — `GetProductByIdUseCase` and `GetProductsByIdsUseCase` — never a `ProductRepository`, the same cross-feature shape `auth` already uses for `users` (pattern 14). New migration `20260816183709_add_products_and_cart`.
+
+**Why** — Requested as the next feature after the `GET /users` list improvements: a product catalog plus the ability for a logged-in user to build a cart from it. The line-items-not-a-`Cart`-row modeling, the upsert-with-increment "add," and the deliberate absence of a "set exact quantity" endpoint or an admin/role system are all explained in [ADR-0018](08-decisions.md#adr-0018--products-and-cart-data-model-and-scope) — each is a real scope decision, not an oversight.
+
+**Docs** — [01-overview](01-overview.md) (products/cart added to "what exists," the authorization gap note extended), [03-project-structure](03-project-structure.md) (full trees for both features), [04-patterns](04-patterns.md) (pattern 14 gained the `cart`→`products` example), [08-decisions](08-decisions.md) (ADR-0018), `backend/README.md` (endpoint tables, `GET /products` query-param table, cart behavior notes, structure tree, curl example, cross-feature-dependency section).
+
+**Verified** — `npm run typecheck`, `lint`, `test` (25 unit tests across 10 suites, including new specs for every products/cart use case), `test:e2e` (31 tests across 3 suites — new `products-cart.e2e-spec.ts` covers auth gating, validation, search, quantity increment, 404s, and the cascade-delete-removes-from-cart case), and `build` all pass. Manually exercised the built app with `curl`: create/list/get/update a product, add-to-cart with default quantity, re-add to confirm the increment, list the enriched cart, add-nonexistent 404, remove, remove-again 404, and delete — all matched expectations; test data cleaned up afterward.
+
+---
+
+## 2026-08-16 — Search, filter, sort, and pagination on `GET /users`
+
+**Changed** — `GET /users` now accepts `page`, `pageSize` (default 20, capped at 100), `search` (case-insensitive, matches `name` or `email`), `createdFrom`/`createdTo` (inclusive date-range filter on `createdAt`), `sortBy` (`name` | `email` | `createdAt` | `updatedAt`), and `sortOrder` (`asc` | `desc`), validated by a new [`GetUsersRequest`](../backend/src/features/users/presentation/dto/get-users.request.ts). The response changed shape from a bare array to `{ items, total, page, pageSize }`, typed by a new generic [`Paginated<T>`](../backend/src/core/domain/pagination.ts) added to `core/`. `UserRepository.findAll` now takes a `UserListQuery` and returns a `Paginated<User>`; [`PrismaUserRepository.findAll`](../backend/src/features/users/infrastructure/repositories/prisma-user.repository.ts) builds the Prisma `where`/`orderBy`/`skip`/`take` from it, running `findMany` and `count` in parallel. `GetUsersUseCase` owns the paging/sort defaults and clamps `pageSize`, so it stays meaningful when called directly with `{}` in a test. Added `PaginatedUsersResponse` for Swagger and explicit `@ApiQuery()` decorators on the controller, since `@ApiProperty()` on a `@Query()` DTO class isn't picked up without the (unused, by choice) `@nestjs/swagger` CLI plugin. Updated the users e2e suite (search, pagination, and an invalid-`sortBy` 400 case) and added a `get-users.use-case.spec.ts` unit test.
+
+**Why** — Requested as a follow-up to the users CRUD work; a bare unbounded `findMany` doesn't hold up once the table has more than a handful of rows. See [ADR-0017](08-decisions.md#adr-0017--search-filter-sort-and-pagination-on-get-users) for why the query surface stops where it does (one search param, one date-range filter, a closed sort-column enum) instead of a general-purpose filter DSL.
+
+**Docs** — [02-architecture](02-architecture.md) (`core/` now lists `Paginated<T>`), [03-project-structure](03-project-structure.md) (new files under `core/domain/` and `features/users/`), [04-patterns](04-patterns.md) (new pattern 19: generic pagination envelope + feature-specific query + `@ApiQuery` for `@Query()` DTOs), [05-technologies](05-technologies.md) (the `@ApiProperty`-on-`@Query()` gotcha), [08-decisions](08-decisions.md) (ADR-0017), `backend/README.md` (endpoint table, query-param table, structure tree, Swagger note).
+
+**Verified** — `npm run typecheck`, `lint`, `test` (11 unit, including the new `get-users.use-case.spec.ts`), `test:e2e` (14, across 2 suites, against a live Postgres container), and `build` all pass on the backend. Manually exercised the built app with `curl`: search + sort desc + page 1/2 of a 3-user set returned the right slices with correct `total`/`page`/`pageSize`, an invalid `sortBy` returned `400` with a clear message, and a far-future `createdFrom` correctly returned zero results; test users were deleted afterward.
 
 ---
 

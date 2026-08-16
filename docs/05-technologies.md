@@ -43,6 +43,7 @@
 | -------------------------- | ------- | ------------------------------------------------------------ |
 | `@nestjs/common` / `core`  | 11.2.1  | Module system and DI container                               |
 | `@nestjs/platform-express` | 11.2.1  | HTTP adapter                                                 |
+| `@nestjs/swagger`           | 11.4.6  | Generates the OpenAPI document from decorators; serves Swagger UI at `/docs` |
 | `express`                  | 5.2.1   | Pulled in by the platform adapter                            |
 | `reflect-metadata`         | 0.2.2   | Required by Nest's decorator metadata                        |
 | `rxjs`                     | 7.8.2   | A Nest peer dependency; not used in application code         |
@@ -79,6 +80,17 @@ Prisma 7 shipped after most recalled knowledge of Prisma was formed and changed 
 - **The new default generator (`provider = "prisma-client"`) emits ESM-only code.** Its `client.ts` opens with `import.meta.url`, which cannot compile under this project's CommonJS Nest build. This project deliberately stays on the classic `provider = "prisma-client-js"` generator, which still outputs to `node_modules/@prisma/client` in CommonJS and needs no custom `output` path. See [ADR-0014](08-decisions.md#adr-0014--stay-on-the-classic-prisma-client-js-generator).
 - **`prisma migrate dev` does not print a "Generated Prisma Client" confirmation the way `prisma generate` does**, and in this project's first run it genuinely hadn't regenerated the client — `npm run prisma:generate` had to be run explicitly afterward. If types look stale after a schema change, run it.
 - **`prisma.config.ts` is loaded by the CLI's own bundler**, not by this project's `tsconfig.json` / `ts-node`, so it can use `import`/`export default` regardless of the backend's CommonJS module setting.
+
+### Swagger / OpenAPI
+
+- **Decorators need a class; the application layer deliberately doesn't have one.** `@nestjs/swagger` reflects on runtime metadata that `@ApiProperty()` attaches to a class property — an `interface` (what `application/dto/*.dto.ts` are, on purpose) is erased at compile time and has nothing to reflect on. This project adds documentation-only `presentation/dto/*.response.ts` classes for exactly this reason — see [pattern 18](04-patterns.md#18-response-dtos-mirror-request-dtos-for-the-same-reason).
+- **No `@nestjs/swagger` CLI plugin.** Nest offers a `nest-cli.json` plugin that statically analyzes source at build time to reduce `@ApiProperty()` boilerplate. This project decorates by hand instead, to keep the build a single, well-understood `tsc` pass rather than adding an AST-transform step. One consequence: without the plugin, `@ApiProperty()` on a `@Query()` DTO class is inert — Swagger only reflects it for `@Body()` parameters. A `GET` route with query params (e.g. `GET /users`, see [`get-users.request.ts`](../backend/src/features/users/presentation/dto/get-users.request.ts)) needs an explicit `@ApiQuery({ name: ... })` per param on the controller instead.
+- **`@ApiBearerAuth('access-token')` and `@UseGuards(JwtAuthGuard)` are two separate, unenforced declarations.** Swagger has no way to inspect a guard and infer what "protected" means, so the two are kept in sync by hand on every route. If a route gets a guard without the matching decorator (or vice versa), nothing fails — the docs just lie about what the API actually requires. Worth an eye during review.
+- **`@nestjs/swagger` pins a vulnerable transitive dependency.** It depends on `js-yaml@5.2.1` exactly (not a range), which carries a known high-severity ReDoS advisory (GHSA-pm4m-ph32-ghv5, fixed in `5.2.2`). Not practically exploitable here — this app never calls `js-yaml`'s `load()` on untrusted input, Swagger only uses it internally to serialize the generated OpenAPI document — but there's no reason to ship a flagged version. Forced to a patched release with a scoped npm `overrides` entry in the root [`package.json`](../package.json):
+  ```json
+  "overrides": { "@nestjs/swagger": { "js-yaml": "^5.2.2" } }
+  ```
+  Scoped to `@nestjs/swagger` specifically, not a blanket `"js-yaml": "^5.2.2"` override — other transitive dependents (`@eslint/eslintrc`, `ts-jest`'s Istanbul chain) need `js-yaml@^3`/`^4`, and a blanket override breaks their install (`npm ls` reports `invalid`). A blanket override was tried first and confirmed broken before landing on the scoped form. An override change requires a full reinstall (`rm -rf node_modules package-lock.json && npm install`) to take effect — a plain `npm install` on top of an existing lockfile did not re-resolve it.
 
 ## Local database
 

@@ -1,6 +1,6 @@
 # 08 — Decisions
 
-> Last updated: 2026-08-16 (added ADR-0012 through ADR-0016: users/auth on Postgres + Prisma 7 + JWT)
+> Last updated: 2026-08-16 (added ADR-0012 through ADR-0016: users/auth on Postgres + Prisma 7 + JWT; ADR-0017: GET /users search/filter/sort/pagination; ADR-0018: products + cart)
 
 A log of choices that a future reader could reasonably question, so nobody has to re-litigate them from scratch — or, better, so they can overturn one on purpose, knowing what it was for.
 
@@ -209,3 +209,46 @@ That closed a circular CommonJS `require()` loop: `users.controller.ts` → `aut
 **Decision.** [`backend/docker-compose.yml`](../backend/docker-compose.yml) declares a single `db` service on the official `postgres:17-alpine` image, with a named volume and a healthcheck, configured entirely through environment variables (defaulted in the compose file, overridable via `backend/.env`). No custom `Dockerfile`.
 
 **Consequences.** `npm run db:up` / `db:down` / `db:logs` are the whole interface; there is nothing to build or maintain beyond the compose file. If the database ever needs custom initialization (extensions, seed scripts) beyond what `postgres`'s official image's `/docker-entrypoint-initdb.d` convention covers, that is the trigger to add a `Dockerfile` that extends the base image.
+
+---
+
+## ADR-0017 — Search, filter, sort, and pagination on `GET /users`
+
+`2026-08-16` · **Accepted**
+
+**Context.** `GET /users` returned every row as a bare array with a fixed `orderBy: { createdAt: 'asc' }` — fine for a handful of seed users, not for a real table. It needed search, at least one real filter, configurable sort, and pagination, without over-building a general-purpose query DSL nobody asked for.
+
+**Decision.**
+- **Response envelope.** `{ items, total, page, pageSize }`, typed as a new generic `Paginated<T>` in `core/domain/pagination.ts` — not a bare array — so the client can render "page 2 of N" without a second `COUNT` call of its own. This is a breaking change to the endpoint's shape; there is no versioned API yet, so no dual-shape transition was built.
+- **Search** is one param (`search`) matched case-insensitively against `name` OR `email` — not a per-field `nameContains`/`emailContains` pair. Two fields felt like real query flexibility nobody had asked for yet.
+- **Filter** is a `createdFrom`/`createdTo` inclusive date range on `createdAt` — chosen as the one filter distinct from search that's obviously useful on a user list (audit / "who signed up this week" questions), rather than adding a filter per column speculatively.
+- **Sort** is restricted to a closed enum — `name | email | createdAt | updatedAt` — validated with `class-validator`'s `@IsIn`, not an arbitrary column name. An arbitrary string passed straight to Prisma's `orderBy` would let a caller sort (and thus indirectly probe the existence of) any column, including `passwordHash`.
+- **Pagination defaults**: `page` defaults to `1`, `pageSize` defaults to `20` and is capped at `100` — enforced twice, with different failure modes on purpose: `class-validator`'s `@Max(100)` on the HTTP request rejects an out-of-range `pageSize` with `400` (the caller finds out immediately), while `GetUsersUseCase` separately clamps with `Math.min` so a direct unit-test or future non-HTTP caller of the use case can't accidentally request an unbounded page.
+- **Where defaults live**: the use case, not the controller or the repository — see [pattern 19](04-patterns.md#19-list-endpoints-a-generic-paginatedt-a-feature-specific-query-apiquery-instead-of-apiproperty). Keeps "what does an empty query mean" a business rule, testable with `new GetUsersUseCase(fake).execute({})`, independent of Nest.
+
+**Consequences.** `GET /users` is no longer backward-compatible with a client expecting a bare array — acceptable here because the only consumer is the e2e suite (updated in the same session) and there is no shipped frontend consumer yet. `Paginated<T>` sets a precedent other list endpoints (there are none yet) are expected to follow, so its shape is now something a future feature can question but shouldn't casually diverge from without a reason.
+
+**Revisit when** a second feature needs to list something — confirms whether `Paginated<T>` in `core/` was the right call (see [ADR-0008](08-decisions.md#adr-0008--duplicate-core-primitives-instead-of-a-shared-package) for the standard this is held to), or a real caller needs a filter this design doesn't cover (e.g. filtering by an exact field, or combining search with a boolean flag on the entity), which is the trigger to extend `UserListQuery` rather than add a second, parallel query mechanism.
+
+*(That second feature arrived in the same project: `GET /products` reuses this exact shape — see [ADR-0018](08-decisions.md#adr-0018--products-and-cart-data-model-and-scope) — confirming `Paginated<T>` in `core/` earns its place.)*
+
+---
+
+## ADR-0018 — Products and cart: data model and scope
+
+`2026-08-16` · **Accepted**
+
+**Context.** Requested as: a `Product` with title, short/long description, and an image URL, plus a per-user cart users can add products to and remove them from. Two implementation questions had no single obviously-correct answer: how to model "a user's cart," and how much query/filter surface `Product` needs on top of what `GET /users` already established.
+
+**Decision.**
+- **`price` and `category` fields** were added to `Product` beyond the original four, at the requester's explicit follow-up — `price: Float` (not Prisma's `Decimal`, to avoid pulling in decimal-safe arithmetic handling for a demo-scale project; revisit if real money math — refunds, discounts, tax — shows up) and `category: String` with no fixed enum (no catalog of categories exists yet to validate against).
+- **A cart is line items, not a `Cart` row.** `CartItem(userId, productId, quantity)` with `@@unique([userId, productId])` — a user has exactly one implicit cart, so there is nothing a separate `Cart` entity would own that `CartItem` rows collectively don't already express. `onDelete: Cascade` on both the `userId` and `productId` relations means deleting a user or a product cleans up cart rows automatically — no cleanup use case to write or forget.
+- **"Add" is an upsert-with-increment**, not "insert or fail": `POST /cart/items` on a product already in the cart increments its quantity by the given amount (default 1) rather than erroring or replacing it. There is deliberately no "set exact quantity" endpoint yet — only add/remove was asked for, and an increment-only API is simpler to reason about and to test than one that also has to define what "set to 0" means (is that the same as remove?).
+- **"Remove" deletes the row**, it does not decrement. A caller that wants "one fewer" has no endpoint for that yet; this was an explicit tradeoff to keep the API surface to exactly what was asked (add, remove), not to guess at a decrement semantic nobody requested.
+- **`GET /products` reuses the `Paginated<T>` + search/sort pattern** built for `GET /users` (pattern 19, [ADR-0017](08-decisions.md#adr-0017--search-filter-sort-and-pagination-on-get-users)) — `search` matches `title` only, sorting adds `price` to the enum, and there is no date-range filter (nothing about a product suggested an obvious equivalent to `users`' `createdFrom`/`createdTo`, so none was added speculatively).
+- **`cart` depends on `products`' public use cases, not a `ProductRepository`.** `AddCartItemUseCase` calls `GetProductByIdUseCase` to confirm a product exists before writing; `GetCartUseCase` calls `GetProductsByIdsUseCase` to enrich cart rows. See pattern 14 in [04-patterns](04-patterns.md#14-cross-feature-composition-through-a-purpose-built-use-case) — this is the same shape `auth` uses for `users`, applied a second time.
+- **No admin/role system**, matching [ADR-0013](08-decisions.md#adr-0013--jwt-guard-only-on-get-users-for-now)'s precedent: browsing (`GET /products`, `GET /products/:id`) is public; create/update/delete require a bearer token, full stop — any logged-in user can edit or delete any product, not just ones they created (there is no "created by" field to check against anyway).
+
+**Consequences.** The upsert-with-increment `addItem` uses a single Prisma `upsert` keyed on the compound unique constraint, so a concurrent double-add correctly lands on 2, not a duplicate row or a lost update. A cart row referencing a deleted product is a database-level impossibility given the cascade, but `GetCartUseCase` still skips defensively if a lookup ever comes back short, rather than trusting that invariant absolutely. The product mutation endpoints have the same "any authenticated user, no ownership check" gap `users` already has, now duplicated onto a second resource — worth fixing once, for both, when real authorization is designed.
+
+**Revisit when** a caller needs to set an exact cart quantity (add the `PATCH` endpoint then, not speculatively now), a real pricing concern (discounts, currency, tax) demands `Decimal` over `Float`, categories need to be a closed set with their own management UI, or the authorization gap above gets addressed — at which point it should cover `users`, `products`, and `cart` mutations together rather than being bolted on resource by resource.

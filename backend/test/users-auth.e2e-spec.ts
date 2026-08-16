@@ -90,9 +90,50 @@ describe('Users + Auth (e2e)', () => {
       .set('Authorization', `Bearer ${accessToken}`)
       .expect(200);
 
-    expect(response.body).toEqual(
+    const body = response.body as { items: unknown[]; total: number };
+    expect(body.items).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: userId, email })]),
     );
+    expect(body.total).toBeGreaterThanOrEqual(1);
+  });
+
+  it('GET /users filters by search', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/users')
+      .query({ search: email })
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+
+    const body = response.body as {
+      items: { id: string }[];
+      total: number;
+      page: number;
+      pageSize: number;
+    };
+    expect(body.items).toEqual([expect.objectContaining({ id: userId })]);
+    expect(body.total).toBe(1);
+    expect(body.page).toBe(1);
+    expect(body.pageSize).toBe(20);
+  });
+
+  it('GET /users paginates with page and pageSize', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/users')
+      .query({ page: 1, pageSize: 1, sortBy: 'email', sortOrder: 'asc' })
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+
+    const body = response.body as { items: unknown[]; pageSize: number };
+    expect(body.items).toHaveLength(1);
+    expect(body.pageSize).toBe(1);
+  });
+
+  it('GET /users rejects an invalid sortBy with 400', async () => {
+    await request(app.getHttpServer())
+      .get('/users')
+      .query({ sortBy: 'not-a-column' })
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(400);
   });
 
   it('GET /users/:id succeeds with a valid bearer token', async () => {
