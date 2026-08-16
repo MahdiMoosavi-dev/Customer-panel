@@ -1,6 +1,6 @@
 # 04 — Patterns
 
-> Last updated: 2026-08-16
+> Last updated: 2026-08-16 (added: cross-feature use cases, shared guards, request-DTO validation, Prisma error translation)
 
 The recurring patterns in this codebase, each with what it is, why it is here, and when *not* to reach for it. Code samples are trimmed for shape — the files linked from each section are the source of truth.
 
@@ -214,3 +214,79 @@ export class GetGreetingUseCase {
 **What.** `no-restricted-imports` rules encode the dependency rule and the feature-privacy rule in both workspaces.
 
 **Why.** Written rules erode; a failing `npm run lint` does not. When you legitimately need to cross a boundary, the fix is to change the rule deliberately (and record it in [08-decisions](08-decisions.md)) rather than to slip past it.
+
+**Note.** The backend rule originally only checked files *outside* `features/`, so one feature could still deep-import another feature's internals undetected. It was tightened to apply repo-wide once the `auth`/`users` pair made that gap concrete — see [ADR-0011](08-decisions.md#adr-0011--documentation-is-updated-in-the-same-session-as-the-change) era work in [backend/eslint.config.mjs](../backend/eslint.config.mjs).
+
+---
+
+## 14. Cross-feature composition through a purpose-built use case
+
+**What.** When feature B genuinely needs something from feature A, A exposes a use case shaped for exactly that need — not its repository, not its internals.
+
+```ts
+// features/users/index.ts
+export { VerifyUserCredentialsUseCase } from './application/use-cases/verify-user-credentials.use-case';
+```
+
+`auth`'s `LoginUseCase` takes a `VerifyUserCredentialsUseCase` in its constructor and calls `.execute({ email, password })`. It never sees a `UserRepository`, a `PasswordHasher`, or a password hash.
+
+**Why.** This is the feature-level version of ports and adapters: `users` decides how credential verification works (repository lookup, hash comparison, normalizing "no such user" and "wrong password" into the same generic failure) and publishes only the capability, not the mechanism. `auth` depends on a capability it can't misuse.
+
+**When not to.** If two features want the *same* primitive (not a capability one owns), that is a `core/` or `shared/` candidate instead — see pattern 12 and [ADR-0008](08-decisions.md#adr-0008--duplicate-core-primitives-instead-of-a-shared-package).
+
+---
+
+## 15. Cross-cutting guards live in `shared/`, not inside the feature that issues the tokens
+
+**What.** `JwtAuthGuard` lives in `backend/src/shared/http/jwt-auth.guard.ts`, not in `features/auth/presentation/`. Its dependency — the `TokenService` port, `TokenPayload`, and the `TOKEN_SERVICE` token — lives in `core/domain/token.ts`, not in `features/auth/domain/`. Only the *implementation* (`JwtTokenService`, wrapping `@nestjs/jwt`) stays inside `features/auth/infrastructure/`.
+
+```ts
+// any feature's controller
+import { JwtAuthGuard } from '@/shared/http/jwt-auth.guard';
+
+@UseGuards(JwtAuthGuard)
+@Get()
+findAll() { ... }
+```
+
+**Why.** This one was learned the hard way, not designed up front. The first version put the guard inside `features/auth/`. `UsersController` needed it, so it imported `@/features/auth`. `AuthModule` needed `VerifyUserCredentialsUseCase`, so it imported `@/features/users`. That closed a circular CommonJS `require()` loop: `users.controller.ts` → `auth/index.ts` → `auth.module.ts` → `users/index.ts` → `users.module.ts` → `users.controller.ts`. Node resolves a circular `require()` to whichever side is still mid-evaluation, so `JwtAuthGuard` came back `undefined` — and Nest's `@UseGuards()` decorator throws `InvalidDecoratorItemException` at boot, not at lint time. `@Global()` on `AuthModule` fixed Nest's DI-resolution circularity but did nothing for this — a plain JavaScript module cycle, one layer below anything Nest controls.
+
+The fix is not a workaround; it's recognizing that a bearer-token guard was never really *auth business logic* — it's HTTP-layer plumbing every feature attaches, exactly like `to-http-exception.ts` already is. Moving the port to `core/` and the guard to `shared/http/` means `users.controller.ts` never touches `@/features/auth` at all, so the cycle can't exist. Full account: [ADR-0012](08-decisions.md#adr-0012--the-jwt-guard-lives-in-shared-not-in-the-auth-feature).
+
+**When not to.** Not every guard belongs in `shared/` — only ones more than one feature needs, or ones a feature needs from *another* feature that also depends on it. A guard used by exactly one feature, with no risk of this cycle, can stay in that feature's `presentation/`.
+
+---
+
+## 16. Request DTOs validate; application DTOs stay plain
+
+**What.** `application/dto/*.dto.ts` are framework-free interfaces, as pattern 9 describes. Where a controller accepts a body, a sibling class in `presentation/dto/*.request.ts` adds `class-validator` decorators and `implements` the application interface:
+
+```ts
+// application/dto/create-user.dto.ts — framework-free
+export interface CreateUserDto {
+  readonly email: string;
+  readonly name: string;
+  readonly password: string;
+}
+
+// presentation/dto/create-user.request.ts — validated, transport-only
+export class CreateUserRequest implements CreateUserDto {
+  @IsEmail() email!: string;
+  @IsString() @MinLength(2) name!: string;
+  @IsString() @MinLength(8) password!: string;
+}
+```
+
+A global `ValidationPipe({ whitelist, forbidNonWhitelisted, transform })` in `main.ts` enforces every request class.
+
+**Why.** `class-validator` decorators are HTTP-transport concerns — they'd violate "domain and application stay free of frameworks" if they lived on the DTO the use case actually consumes. `implements CreateUserDto` is what keeps the two in sync: if the application DTO's shape changes, the request class fails to compile until it catches up, with zero runtime cost and no separate mapping step (they're structurally the same object).
+
+---
+
+## 17. Repository adapters translate known error codes, not raw exceptions
+
+**What.** [`prisma-user.repository.ts`](../backend/src/features/users/infrastructure/repositories/prisma-user.repository.ts) checks `Prisma.PrismaClientKnownRequestError`'s `code` and maps specific ones to domain errors — `P2002` (unique constraint) → `ConflictError`, `P2025` (record not found) → `NotFoundError` — before falling back to `UnexpectedError` for everything else.
+
+**Why.** This is pattern 6 (the error taxonomy) applied at a concrete adapter: the caller asked "does this email already exist?", not "what did the Postgres driver throw?" Translating by code, not by string-matching a message, survives Prisma version bumps and localized error text.
+
+**When not to.** Don't special-case every Prisma error code you can imagine — only the ones a caller can meaningfully react to differently. Everything else is legitimately `UnexpectedError`.

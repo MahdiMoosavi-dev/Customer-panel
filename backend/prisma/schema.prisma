@@ -1,0 +1,21 @@
+// Prisma 7: no `url` here — the CLI reads DATABASE_URL from prisma.config.ts,
+// and the app supplies its own driver adapter at runtime (see
+// src/shared/prisma/prisma.service.ts). See docs/05-technologies.md.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("users")
+}

@@ -1,6 +1,6 @@
 # Changelog
 
-> Last updated: 2026-08-16
+> Last updated: 2026-08-16 (Postgres + Prisma, users CRUD, JWT auth)
 
 One entry per working session, newest first. This is a log of **what changed in the project**, not a release changelog — it exists so the next person can see how the codebase got to its current shape without reading every commit.
 
@@ -14,6 +14,18 @@ One entry per working session, newest first. This is a log of **what changed in 
 **Docs** — which docs were updated (or "none needed", and why).
 **Verified** — the checks that were actually run.
 ```
+
+---
+
+## 2026-08-16 — Postgres + Prisma, users CRUD, JWT auth (backend only)
+
+**Changed** — On a new `develop/backend` branch: added Postgres 17 via [`backend/docker-compose.yml`](../backend/docker-compose.yml); wired Prisma 7 as the ORM ([`prisma.config.ts`](../backend/prisma.config.ts), [`prisma/schema.prisma`](../backend/prisma/schema.prisma), one migration for a `users` table, [`PrismaService`](../backend/src/shared/prisma/prisma.service.ts) using the now-mandatory `@prisma/adapter-pg` driver adapter). Added a full `users` feature — entity + invariants, `UserRepository`/`PasswordHasher` ports, five CRUD use cases plus `VerifyUserCredentialsUseCase`, a Prisma-backed repository translating `P2002`/`P2025` to `ConflictError`/`NotFoundError`, `bcryptjs` hashing, `class-validator` request DTOs, a global `ValidationPipe`. Added an `auth` feature — `POST /auth/login` issuing a JWT via `@nestjs/jwt`. `GET /users` and `GET /users/:id` are now gated behind a new `JwtAuthGuard`. Extended `core/domain/app-error.ts` with `ConflictError`/`UnauthorizedError`. Tightened the backend's feature-privacy ESLint rule to apply repo-wide (it previously exempted files inside `features/`, so one feature could deep-import another's internals undetected).
+
+**Why** — First real (persisted, protected) feature on the backend, requested as backend-only work while the frontend stays on hold. The `JwtAuthGuard` ended up living in `shared/http/` rather than `features/auth/` because the obvious placement caused a genuine circular `require()` at runtime (`InvalidDecoratorItemException` on boot) — not a style preference, a bug that was hit and fixed. Full account in [ADR-0012](08-decisions.md#adr-0012--the-jwt-guard-lives-in-shared-not-in-the-auth-feature).
+
+**Docs** — [01-overview](01-overview.md) (what exists / gaps updated), [03-project-structure](03-project-structure.md) (backend tree), [04-patterns](04-patterns.md) (4 new patterns: cross-feature use cases, shared guards, request-DTO validation, Prisma error translation), [05-technologies](05-technologies.md) (new dependencies, a dedicated Prisma 7 section, two build/cache gotchas hit while wiring this up), [06-conventions](06-conventions.md) (naming, error taxonomy, env, testing notes), [07-workflows](07-workflows.md) (run the database, protect a route, 7 new troubleshooting rows), [08-decisions](08-decisions.md) (ADR-0012 through ADR-0016), `backend/README.md` (rewritten: setup, endpoint table, Prisma 7 and guard-placement explanations).
+
+**Verified** — `npm run typecheck`, `lint`, `test` (8 unit), and `build` all pass on the backend; `test:e2e` (11 tests across 2 suites) passes against a live Postgres container; manually exercised the full flow with `curl` against the built app — create, duplicate-email 409, weak-password 400, unauthenticated 401, wrong-password login 401, successful login, authenticated list/get, patch, delete, post-delete 404, and confirmed `/greeting` still works.
 
 ---
 

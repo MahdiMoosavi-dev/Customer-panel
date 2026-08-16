@@ -1,6 +1,6 @@
 # 05 — Technologies
 
-> Last updated: 2026-08-16
+> Last updated: 2026-08-16 (added: Prisma 7 + Postgres 17, JWT, bcryptjs, class-validator)
 > Versions below are what is installed in `package-lock.json` as of this date. Re-check with `npm ls <pkg>` before relying on them.
 
 ## Runtime and tooling
@@ -51,13 +51,40 @@
 | `supertest`                | 7.2.2   | HTTP assertions in e2e tests                                 |
 | `prettier`                 | 3.9.6   | Formatting, enforced through `eslint-plugin-prettier`        |
 | `typescript-eslint`        | 8.67.0  | Type-aware linting (`recommendedTypeChecked`)                |
+| `prisma` (CLI, dev)        | 7.9.1   | `migrate`, `generate`, `studio` — see the Prisma 7 section below |
+| `@prisma/client`           | 7.9.1   | Generated ORM client                                          |
+| `@prisma/adapter-pg`       | 7.9.1   | Driver adapter Prisma 7 now requires — wraps `pg`             |
+| `pg`                       | 8.23.0  | node-postgres, the actual driver underneath the adapter        |
+| `@nestjs/jwt`               | 11.0.2  | Thin wrapper over `jsonwebtoken`; used only inside `JwtTokenService` |
+| `bcryptjs`                  | 3.0.3   | Password hashing — pure JS, chosen over `bcrypt` to skip native compilation; see [ADR-0015](08-decisions.md#adr-0015--bcryptjs-over-bcrypt) |
+| `class-validator` / `class-transformer` | 0.15.1 / 0.5.1 | Decorator-based validation for `presentation/dto/*.request.ts`, enforced by a global `ValidationPipe` |
+| `dotenv`                    | 17.4.2  | Loaded once, inside `core/config/env.ts`                       |
 
 ### NestJS things worth knowing
 
 - **Path aliases work at runtime.** `@/*` → `src/*` is declared in `tsconfig.json`, and the Nest CLI rewrites those specifiers to relative `require`s during `nest build` — verified by inspecting `dist/`. Plain `node dist/main` needs no loader or `tsconfig-paths` registration.
+- **A stray root-level `.ts` file can break that rewriting's output path.** Adding `prisma.config.ts` at the backend root (sibling to `src/`) made `nest build`'s inferred `rootDir` widen from `src/` to the project root, so output nested under `dist/src/main.js` instead of `dist/main.js` and `start:prod` (`node dist/main`) broke. Fixed by pinning `rootDir: "src"` and excluding `prisma.config.ts` / `prisma/**` in [`tsconfig.build.json`](../backend/tsconfig.build.json). If a build ever changes its output shape unexpectedly, suspect a new root-level file first.
+- **A stale `tsconfig.build.tsbuildinfo` can make `nest build` silently emit nothing.** It's `incremental`-mode's cache, written to the *backend root* (not into `dist/`), so `rm -rf dist` does not clear it — and a structural tsconfig change (like the `rootDir` fix above) can leave it believing the project is already built. If `nest build` reports success but `dist/` is missing or stale, delete `backend/tsconfig.build.tsbuildinfo` and rebuild. It's already covered by the root `.gitignore`'s `*.tsbuildinfo` pattern.
 - **Jest does not share that rewriting.** Both Jest configs need `moduleNameMapper` for `@/`: the unit config in `package.json` (`<rootDir>/$1`, where `rootDir` is `src`) and `test/jest-e2e.json` (`<rootDir>/../src/$1`, because its `rootDir` resolves to `test/`).
 - **The global prefix is set in `main.ts`, not in modules.** So routes are `/api/greeting` at runtime, but `/greeting` inside e2e tests that bootstrap `AppModule` directly.
 - **Formatting is part of linting.** `eslint-plugin-prettier` reports format drift as an ESLint error; `npm run format` fixes it. The frontend does not have Prettier — see [06-conventions](06-conventions.md#formatting).
+- **A class passed to `@UseGuards()` needs its own dependencies resolvable from the controller's module.** Nest can instantiate an unregistered guard class ad hoc, but it still resolves that guard's constructor dependencies (e.g. `@Inject(TOKEN_SERVICE)`) through the injector of the module the controller lives in. That resolves here only because `AuthModule` — which binds `TOKEN_SERVICE` — is `@Global()`.
+
+### Prisma 7 — this is not the Prisma you remember
+
+Prisma 7 shipped after most recalled knowledge of Prisma was formed and changed enough to break it outright. Confirmed empirically against a real Postgres 17 container before writing any application code — do the same before trusting anything below against a different point release.
+
+- **`datasource { url }` in `schema.prisma` is a hard error, not a deprecation.** `url = env("DATABASE_URL")` fails schema validation (`P1012`) with a message pointing at [`prisma.config.ts`](../backend/prisma.config.ts) instead. The CLI (`migrate`, `generate`, `studio`) now reads `DATABASE_URL` from that file's `datasource.url` field.
+- **The runtime client requires a driver adapter — always, regardless of generator.** `new PrismaClient()` with no arguments throws; `PrismaClientOptions` is now `PrismaClientOptionsWithAdapter | PrismaClientOptionsWithAccelerateUrl`, and `adapter` is required in the former. [`PrismaService`](../backend/src/shared/prisma/prisma.service.ts) passes `new PrismaPg({ connectionString: env.databaseUrl })`.
+- **The new default generator (`provider = "prisma-client"`) emits ESM-only code.** Its `client.ts` opens with `import.meta.url`, which cannot compile under this project's CommonJS Nest build. This project deliberately stays on the classic `provider = "prisma-client-js"` generator, which still outputs to `node_modules/@prisma/client` in CommonJS and needs no custom `output` path. See [ADR-0014](08-decisions.md#adr-0014--stay-on-the-classic-prisma-client-js-generator).
+- **`prisma migrate dev` does not print a "Generated Prisma Client" confirmation the way `prisma generate` does**, and in this project's first run it genuinely hadn't regenerated the client — `npm run prisma:generate` had to be run explicitly afterward. If types look stale after a schema change, run it.
+- **`prisma.config.ts` is loaded by the CLI's own bundler**, not by this project's `tsconfig.json` / `ts-node`, so it can use `import`/`export default` regardless of the backend's CommonJS module setting.
+
+## Local database
+
+- **Postgres 17**, via [`backend/docker-compose.yml`](../backend/docker-compose.yml) — `npm run db:up` / `db:down` / `db:logs` (from `backend/`, or `-w backend` from the root).
+- A single `db` service, a named volume for persistence, credentials from `backend/.env` (`POSTGRES_USER`/`PASSWORD`/`DB`/`PORT`, all defaulted in the compose file too).
+- Not committed: `backend/.env` (gitignored; copy from `.env.example`). `docker-compose.yml` itself is committed — it has no secrets, only variable references with defaults.
 
 ## Monorepo
 

@@ -4,6 +4,8 @@ import type { AppError } from '@/core';
 const STATUS_BY_CODE: Record<string, HttpStatus> = {
   VALIDATION_ERROR: HttpStatus.BAD_REQUEST,
   NOT_FOUND: HttpStatus.NOT_FOUND,
+  CONFLICT: HttpStatus.CONFLICT,
+  UNAUTHORIZED: HttpStatus.UNAUTHORIZED,
   UNEXPECTED_ERROR: HttpStatus.INTERNAL_SERVER_ERROR,
 };
 

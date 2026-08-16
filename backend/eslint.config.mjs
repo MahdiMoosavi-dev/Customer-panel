@@ -33,10 +33,12 @@ export default tseslint.config(
     },
   },
 
-  // Architectural boundaries: features expose a public API only.
+  // Architectural boundaries: features expose a public API only. Applies
+  // repo-wide, including feature-to-feature imports: files inside a feature
+  // always reach their own layers with relative paths, so the only thing
+  // this can ever catch is a deep import into ANOTHER feature's internals.
   {
     files: ['src/**/*.ts'],
-    ignores: ['src/features/*/**'],
     rules: {
       'no-restricted-imports': [
         'error',

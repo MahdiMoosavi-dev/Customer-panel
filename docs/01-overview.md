@@ -17,7 +17,7 @@ Both applications are organized the same way: **feature slices, with clean archi
 
 ## What exists today
 
-The foundation is complete and verified end to end; the product surface is one reference feature.
+The frontend is still the walking skeleton described below. The backend has grown past that: it now has a real, persisted domain (users) behind real authentication, developed on the `develop/backend` branch while the frontend is on hold.
 
 **Frontend** — a landing page that renders `Hello World`:
 
@@ -25,13 +25,15 @@ The foundation is complete and verified end to end; the product surface is one r
 - The route file [`src/app/page.tsx`](../frontend/src/app/page.tsx) is three lines: it renders the feature's view and nothing else.
 - Styling with Tailwind v4 tokens, light and dark, server-rendered with no client JavaScript of its own.
 
-**Backend** — one endpoint, `GET /api/greeting`:
+**Backend**:
 
-- One feature slice, [`backend/src/features/greeting/`](../backend/src/features/greeting/), mirroring the frontend's layers exactly.
-- Returns `{ "headline": "Hello World", "message": "Customer Panel API is up and running." }`.
-- Unit-tested at the use-case level, plus an HTTP-level e2e test.
+- `GET /api/greeting` — the original walking-skeleton feature, unchanged.
+- A `users` feature — full CRUD on a Postgres-backed `User` entity via Prisma, DTOs that never expose the password hash, and a `VerifyUserCredentialsUseCase` exported for other features to depend on (used by `auth`, without exposing the repository or hasher).
+- An `auth` feature — `POST /auth/login` issues a JWT. `GET /users` and `GET /users/:id` are gated behind it via `JwtAuthGuard`. See [backend/README.md](../backend/README.md#the-jwt-guard-lives-in-shared-not-in-featuresauth) for why the guard lives in `shared/http/`, not inside `features/auth/`.
+- A real database: Postgres 17 in Docker ([backend/docker-compose.yml](../backend/docker-compose.yml)), Prisma 7 as the ORM, one migration (`users` table).
+- Request validation via `class-validator` DTOs and a global `ValidationPipe`.
 
-**Tooling** — npm workspaces with one lockfile; TypeScript strict on both sides; ESLint with architecture boundary rules that fail the build on a layering violation; Jest on the backend.
+**Tooling** — npm workspaces with one lockfile; TypeScript strict on both sides; ESLint with architecture boundary rules that fail the build on a layering violation; Jest unit + e2e tests on the backend (e2e now requires the database to be up, since `PrismaService` connects eagerly on module init).
 
 ### Why a "Hello World" feature is worth having
 
@@ -45,14 +47,14 @@ Knowing the gaps is as useful as knowing the contents. None of the following exi
 
 | Missing                          | Notes                                                                                              |
 | -------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Authentication / authorization   | No sessions, no users, no guards.                                                                   |
-| A database                       | The only repository adapter returns static content. The port is ready; the adapter is not.          |
+| Authorization beyond "logged in" | The JWT guard proves a request carries a valid token; nothing yet checks roles, ownership, or permissions. `PATCH`/`DELETE /users/:id` are not gated at all — see [ADR-0013](08-decisions.md#adr-0013--jwt-guard-only-on-get-users-for-now). |
+| Refresh tokens / logout          | `POST /auth/login` issues an access token only. No refresh flow, no revocation, no token blacklist.  |
 | Frontend → backend wiring        | The frontend renders from its own static adapter, so it runs standalone. See [07-workflows](07-workflows.md#connect-the-frontend-to-the-backend). |
-| A shared package                 | `core/` (`Result`, `AppError`) is duplicated in both apps on purpose — see [ADR-0008](08-decisions.md#adr-0008--duplicate-core-primitives-instead-of-a-shared-package). |
+| A shared package                 | `core/` (`Result`, `AppError`, and now `TokenService`) is duplicated in both apps on purpose — see [ADR-0008](08-decisions.md#adr-0008--duplicate-core-primitives-instead-of-a-shared-package). |
 | Frontend tests                   | The backend has Jest; the frontend has no test runner configured yet.                               |
-| CI / CD, deployment, containers  | No pipeline, no Dockerfiles, no environments.                                                       |
+| CI / CD, deployment, containers  | No pipeline beyond local Docker Compose for Postgres, no deployment environments.                    |
 | Observability                    | Nest's default logger only. No metrics, tracing, or error reporting.                                |
-| Validation at the HTTP edge      | No `ValidationPipe`/schema validation yet — needed as soon as an endpoint accepts input.            |
+| Rate limiting                    | `POST /auth/login` and `POST /users` have no throttling — brute-forcing credentials or spamming registrations is currently unmitigated. |
 
 ## Where to go next
 

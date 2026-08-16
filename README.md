@@ -5,16 +5,22 @@ npm-workspaces monorepo with two applications that share one architecture: **fea
 | Workspace                       | Stack                                        | Dev URL                 |
 | ------------------------------- | -------------------------------------------- | ----------------------- |
 | [frontend/](frontend/)          | Next.js 16 (App Router), React 19, Tailwind 4 | http://localhost:3000   |
-| [backend/](backend/)            | NestJS 11, Express                            | http://localhost:4000/api |
+| [backend/](backend/)            | NestJS 11, Express, Postgres 17 + Prisma 7    | http://localhost:4000/api |
 
 ## Getting started
 
 ```bash
-npm install            # once, at the root — installs both workspaces
+npm install                      # once, at the root — installs both workspaces
+cp backend/.env.example backend/.env
+
+npm run db:up -w backend         # Postgres 17 in Docker
+npm run prisma:migrate -w backend  # apply migrations
 
 npm run dev:frontend   # terminal 1 → http://localhost:3000
 npm run dev:backend    # terminal 2 → http://localhost:4000/api/greeting
 ```
+
+The backend needs its database up before it will start — see [backend/README.md](backend/README.md#first-time-setup).
 
 ## Documentation
 
@@ -70,13 +76,16 @@ Dependencies are hoisted to a single root `node_modules` with one `package-lock.
 │           ├── domain/ application/ infrastructure/ presentation/
 │           └── index.ts  # the feature's public API
 └── backend/              # NestJS API → see backend/README.md
+    ├── docker-compose.yml   # Postgres 17 for local dev — `npm run db:up -w backend`
+    ├── prisma/              # schema + migrations (Prisma 7 — see docs/05-technologies.md)
     └── src/
         ├── main.ts app.module.ts
-        ├── core/         # Result, AppError, env
-        ├── shared/http/  # domain error → HTTP status
-        └── features/greeting/
-            ├── domain/ application/ infrastructure/ presentation/
-            └── index.ts  # the feature's public API
+        ├── core/         # Result, AppError, env, TokenService port
+        ├── shared/       # http/ (error mapping, JwtAuthGuard), prisma/ (the one PrismaClient)
+        └── features/     # greeting/ (reference), users/ (CRUD on Postgres), auth/ (JWT login)
+            └── <name>/
+                ├── domain/ application/ infrastructure/ presentation/
+                └── index.ts  # the feature's public API
 ```
 
 ## The rules (both apps)
@@ -92,6 +101,6 @@ Rules 1, 3, and 5 are enforced by `no-restricted-imports` in each workspace's `e
 
 ## Known duplication
 
-`core/` (`Result`, `AppError`) exists in both apps. That is deliberate for now — sharing it means a third workspace and a build step for cross-package types. When the duplication starts to hurt, extract `packages/shared/` and add it to `workspaces` in the root [package.json](package.json).
+`core/` (`Result`, `AppError`, `TokenService`) exists in both apps. That is deliberate for now — sharing it means a third workspace and a build step for cross-package types. When the duplication starts to hurt, extract `packages/shared/` and add it to `workspaces` in the root [package.json](package.json).
 
 The two apps are also not yet wired together: the frontend renders its greeting from its own static adapter, not from `GET /api/greeting`. To connect them, add an `HttpGreetingRepository` in `frontend/src/features/landing/infrastructure/repositories/` that fetches `NEXT_PUBLIC_API_URL` and swap the one line in [landing.container.ts](frontend/src/features/landing/infrastructure/di/landing.container.ts) — no other file changes. That is the whole point of the ports-and-adapters split.

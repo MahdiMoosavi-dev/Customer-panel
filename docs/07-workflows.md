@@ -1,6 +1,6 @@
 # 07 — Workflows
 
-> Last updated: 2026-08-16
+> Last updated: 2026-08-16 (added: run the database, protect a route with JWT, Prisma/build troubleshooting)
 
 Step-by-step recipes for the things you will actually do. All commands run from the **repo root** unless stated otherwise.
 
@@ -11,8 +11,17 @@ Step-by-step recipes for the things you will actually do. All commands run from 
 ```bash
 npm install                      # installs both workspaces into one hoisted node_modules
 cp frontend/.env.example frontend/.env.local     # optional; defaults work without it
-cp backend/.env.example backend/.env             # optional
+cp backend/.env.example backend/.env             # do this one — the database needs its values
 ```
+
+## Run the database (backend only, but required before `dev:backend`)
+
+```bash
+npm run db:up -w backend         # Postgres 17 in Docker, via docker-compose.yml
+npm run prisma:migrate -w backend  # applies backend/prisma/migrations/ (prompts for a name on a new migration)
+```
+
+`PrismaService` connects on module init, so `dev:backend`, `start:backend`, and `test:e2e -w backend` all fail fast if the database isn't reachable. `db:down -w backend` stops it; the named Docker volume keeps your data across restarts.
 
 ## Run the apps
 
@@ -113,6 +122,16 @@ Same slice, Nest flavour. For a `customers` feature:
 export const CUSTOMER_REPOSITORY = Symbol('CustomerRepository');
 ```
 
+If the route accepts a body, add a validated request class next to the controller, implementing the application-layer DTO so the two can't silently drift:
+
+```ts
+// presentation/dto/create-customer.request.ts
+export class CreateCustomerRequest implements CreateCustomerDto {
+  @IsEmail() email!: string;
+  @IsString() @MinLength(2) name!: string;
+}
+```
+
 **4. Controller.**
 
 ```ts
@@ -129,18 +148,38 @@ export class CustomerController {
 }
 ```
 
-**5. Composition root** — `infrastructure/customer.module.ts`, binding the token to the adapter and building the use case with `useFactory`, as in [`greeting.module.ts`](../backend/src/features/greeting/infrastructure/greeting.module.ts).
+**5. Composition root** — `infrastructure/customer.module.ts`, binding the token to the adapter and building the use case with `useFactory`, as in [`greeting.module.ts`](../backend/src/features/greeting/infrastructure/greeting.module.ts) or, for a database-backed example, [`users.module.ts`](../backend/src/features/users/infrastructure/users.module.ts).
+
+If the repository is Prisma-backed: add the model to [`prisma/schema.prisma`](../backend/prisma/schema.prisma), then `npm run prisma:migrate -w backend` to create and apply a migration. `PrismaService` is `@Global()`, so the repository's constructor just takes `private readonly prisma: PrismaService` — no explicit import of `PrismaModule` needed.
 
 **6. Register it** in [`app.module.ts`](../backend/src/app.module.ts):
 
 ```ts
-@Module({ imports: [GreetingModule, CustomerModule] })
+@Module({ imports: [PrismaModule, GreetingModule, CustomerModule] })
 export class AppModule {}
 ```
 
-**7. Test it.** A `*.spec.ts` next to the use case with a fake repository, and an entry in `backend/test/*.e2e-spec.ts` if the route matters end to end. Remember e2e hits `/customers`, not `/api/customers`.
+**7. Test it.** A `*.spec.ts` next to each use case with a fake repository (see [`create-user.use-case.spec.ts`](../backend/src/features/users/application/use-cases/create-user.use-case.spec.ts) for the shape), and an entry in `backend/test/*.e2e-spec.ts` if the route matters end to end — bring the database up first (`npm run db:up -w backend`). Remember e2e hits `/customers`, not `/api/customers`. If the test creates data, generate a unique value (`randomUUID()`) and clean up at the end, as [`users-auth.e2e-spec.ts`](../backend/test/users-auth.e2e-spec.ts) does — the suite runs against a real, shared database, not a fixture.
 
 **8. Update the docs** — endpoint table in `backend/README.md`, plus [03-project-structure](03-project-structure.md) and the [CHANGELOG](CHANGELOG.md).
+
+---
+
+## Protect a backend route with JWT
+
+Attach the guard — it lives in `shared/`, not in `features/auth/`, and works from any feature without importing the auth feature:
+
+```ts
+import { JwtAuthGuard } from '@/shared/http/jwt-auth.guard';
+
+@UseGuards(JwtAuthGuard)
+@Get()
+findAll() { ... }
+```
+
+That's the whole recipe — no module wiring needed, since `AuthModule` (which binds the guard's `TOKEN_SERVICE` dependency) is `@Global()`. Inside a handler, the verified claims are on the request as `request.user: TokenPayload` (`{ sub, email }`), via the ambient augmentation in [`shared/http/express.d.ts`](../backend/src/shared/http/express.d.ts).
+
+**Do not** put a guard, interceptor, or pipe more than one feature will use *inside* a specific feature's `presentation/` folder — if a second feature needs it and also happens to be a dependency of the feature that owns it, you get a circular module import. This happened once already building `JwtAuthGuard`: see [ADR-0012](08-decisions.md#adr-0012--the-jwt-guard-lives-in-shared-not-in-the-auth-feature) and pattern 15 in [04-patterns](04-patterns.md).
 
 ---
 
@@ -243,3 +282,10 @@ Add it to the workspace's `package.json`; if it is useful across both, add a fan
 | A nested `node_modules/` appears inside a workspace                   | Two workspaces want different majors of the same package. Align the versions and reinstall.          |
 | Backend lint fails on formatting                                      | Prettier drift: `npm run lint:fix -w backend`.                                                       |
 | Changed `tsconfig.json` paths and runtime broke                       | Nest rewrites aliases at build time and Jest maps them separately — update `tsconfig`, both Jest configs, and rebuild. |
+| `start:prod` / `node dist/main` fails with `Cannot find module '.../dist/main.js'` | `nest build`'s inferred `rootDir` widened — check `dist/` for a nested `dist/src/main.js` instead. Usually caused by a new `.ts` file at the backend root (like `prisma.config.ts`). Fix: pin `rootDir` and exclude the offending file in `tsconfig.build.json`, as already done there. |
+| `nest build` reports success but `dist/` is empty, missing, or stale  | Delete `backend/tsconfig.build.tsbuildinfo` (the `incremental`-mode cache — it lives at the backend root, so `rm -rf dist` doesn't touch it) and rebuild.                                             |
+| `InvalidDecoratorItemException: Invalid guard passed to @UseGuards()` (or the guard/provider is `undefined` at boot) | A circular CommonJS `require()` between two features — check whether feature A imports feature B's public API while B (directly or via its module graph) imports A's. Move the shared piece to `shared/` or `core/` so neither feature needs the other for it; see [ADR-0012](08-decisions.md#adr-0012--the-jwt-guard-lives-in-shared-not-in-the-auth-feature). |
+| `Type 'string' is not assignable to type 'number \| StringValue \| undefined'` wiring `@nestjs/jwt`'s `expiresIn` | It wants a `number` (seconds) or a branded literal string type from `ms`, not a generic `string`. Use a numeric seconds env var (`JWT_EXPIRES_IN_SECONDS`) instead of casting.                       |
+| Prisma: `The datasource property 'url' is no longer supported in schema files` (`P1012`) | Prisma 7. Remove `url` from `schema.prisma`'s `datasource` block; put it in `prisma.config.ts`'s `datasource.url` instead. See [05-technologies](05-technologies.md#prisma-7--this-is-not-the-prisma-you-remember). |
+| Prisma: `new PrismaClient()` throws about a missing adapter             | Prisma 7 requires a driver adapter always. Pass `{ adapter: new PrismaPg({ connectionString }) }` — see [`prisma.service.ts`](../backend/src/shared/prisma/prisma.service.ts).                        |
+| `npm run test:e2e -w backend` fails entirely, not just DB-touching tests | The database isn't up — `PrismaService` connects eagerly when `AppModule` is bootstrapped. Run `npm run db:up -w backend` first.                                                                      |

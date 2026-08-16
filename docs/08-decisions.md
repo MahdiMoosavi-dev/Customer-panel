@@ -1,6 +1,6 @@
 # 08 — Decisions
 
-> Last updated: 2026-08-16
+> Last updated: 2026-08-16 (added ADR-0012 through ADR-0016: users/auth on Postgres + Prisma 7 + JWT)
 
 A log of choices that a future reader could reasonably question, so nobody has to re-litigate them from scratch — or, better, so they can overturn one on purpose, knowing what it was for.
 
@@ -145,3 +145,67 @@ A log of choices that a future reader could reasonably question, so nobody has t
 **Decision.** `docs/` is the reference for the project, and any session that changes part of the project updates the corresponding docs and adds a CHANGELOG entry before reporting the work done. The trigger table lives in [docs/README.md](README.md#keeping-these-docs-current); the root [AGENTS.md](../AGENTS.md) carries the rule into every agent session automatically.
 
 **Consequences.** A small tax on every change, and the docs stay trustworthy enough to be worth reading. No automated enforcement exists yet — if compliance slips, a CI check on "docs changed when `src/` changed" is the next step.
+
+---
+
+## ADR-0012 — The JWT guard lives in `shared/`, not in the auth feature
+
+`2026-08-16` · **Accepted**
+
+**Context.** Building the first protected route (`GET /users`), the obvious design put `JwtAuthGuard` inside `features/auth/presentation/guards/`, alongside the port it depends on (`TokenService`) and its login use case. `UsersController` then imported it via `@/features/auth`. Separately, `auth`'s `LoginUseCase` needs `users`' `VerifyUserCredentialsUseCase`, so `AuthModule` imports `@/features/users`.
+
+That closed a circular CommonJS `require()` loop: `users.controller.ts` → `auth/index.ts` → `auth.module.ts` → `users/index.ts` → `users.module.ts` → `users.controller.ts`. This is not hypothetical — it happened. `nest build` succeeded, but the running app crashed on boot: `InvalidDecoratorItemException: Invalid guard passed to @UseGuards() decorator (UsersController)`, because Node resolves a circular `require()` to whichever side of the cycle is still mid-evaluation, and `JwtAuthGuard` came back `undefined` at the point `@UseGuards(JwtAuthGuard)` ran. Marking `AuthModule` `@Global()` (to solve Nest's own DI-resolution circularity for the token) did not fix this — it's a plain JavaScript module-loading problem, one layer below anything Nest's DI container controls.
+
+**Decision.** Recognize that a bearer-token guard was never really *auth business logic* — it's HTTP-layer plumbing any feature can attach, the same category as `to-http-exception.ts`. Move the **port** (`TokenService`, `TokenPayload`, `TOKEN_SERVICE`) to `core/domain/token.ts`, next to `Result`/`AppError`, and the **guard** to `shared/http/jwt-auth.guard.ts`. Only the **adapter** (`JwtTokenService`, the only file that knows a JWT is involved) stays inside `features/auth/infrastructure/`. `features/auth/` now has no `domain/` folder of its own — its one domain concept turned out to be cross-cutting.
+
+**Consequences.** `users.controller.ts` now imports `@/shared/http/jwt-auth.guard`, never `@/features/auth` — the cycle cannot exist. Any future feature can `@UseGuards(JwtAuthGuard)` without importing `auth` at all, resolved through `AuthModule`'s global `TOKEN_SERVICE` binding. The cost is one asymmetry to remember: `auth`'s public API (`AuthModule`, `AuthTokenDto`) does not include the guard or the token type, which live one level up/over instead. Also tightened the backend's `no-restricted-imports` deep-feature-import rule to apply repo-wide (previously it exempted files *inside* `features/`, so feature-to-feature deep imports weren't caught) — see [04-patterns, pattern 15](04-patterns.md#15-cross-cutting-guards-live-in-shared-not-inside-the-feature-that-issues-the-tokens).
+
+---
+
+## ADR-0013 — JWT guard only on `GET /users` for now
+
+`2026-08-16` · **Accepted**
+
+**Context.** The task was specifically "clean pattern jwt auth for Get users." `POST /users` (registration), `PATCH /users/:id`, and `DELETE /users/:id` could reasonably also require authentication in a finished product.
+
+**Decision.** Gate exactly `GET /users` and `GET /users/:id` behind `JwtAuthGuard`. `POST /users` stays open (it's the only way to create the first account — there is no separate admin-provisioning flow). `PATCH`/`DELETE` are left ungated, not because it's correct, but because scoping the guard to what was asked keeps the decision visible and easy to revisit, rather than silently guessing at a broader authorization model (which routes need which role, whether a user can only edit themselves, etc.) that hasn't been decided yet.
+
+**Consequences.** Anyone who knows a user's `id` can currently update or delete that user without a token. This is a real, intentional gap — flagged in [01-overview](01-overview.md#what-is-deliberately-not-here-yet) and the endpoint table in `backend/README.md`, not silently shipped.
+
+**Revisit when** the authorization model is decided — at minimum, whether `PATCH`/`DELETE` require the token to belong to the same user being modified, or a role check.
+
+---
+
+## ADR-0014 — Stay on the classic `prisma-client-js` generator
+
+`2026-08-16` · **Accepted**
+
+**Context.** Prisma 7's `prisma init` now defaults to `provider = "prisma-client"`, a new generator with a custom `output` path. Verified empirically (against a real Postgres 17 container, before writing any application code) that its generated `client.ts` opens with `import.meta.url` — valid only in ESM. This project's Nest build is CommonJS (`sourceType: 'commonjs'`, no `"type": "module"`), so that file cannot compile as-is; adopting it would mean converting the whole backend to ESM, a change with its own Nest/Jest/ts-node complications, undertaken as a side effect of a database task rather than a deliberate choice.
+
+**Decision.** Keep the schema on `generator client { provider = "prisma-client-js" }` — the classic generator, which still emits CommonJS to the default `node_modules/@prisma/client` location. No custom `output` path needed.
+
+**Consequences.** The driver-adapter requirement (see [`prisma.service.ts`](../backend/src/shared/prisma/prisma.service.ts)) applies to both generators equally — that part of the Prisma 7 change can't be avoided either way. Staying on the classic generator is lower-risk for this stack but is explicitly the *non-default* choice as of Prisma 7; revisit if a future Prisma release deprecates it, or if the backend ever moves to ESM for other reasons.
+
+---
+
+## ADR-0015 — `bcryptjs` over `bcrypt`
+
+`2026-08-16` · **Accepted**
+
+**Context.** The canonical `bcrypt` package ships a native addon requiring `node-gyp` and a C++ toolchain at install time, which can fail or slow down installs in constrained or sandboxed environments.
+
+**Decision.** Use `bcryptjs`, a pure-JavaScript implementation with the same API shape, behind the feature's own `PasswordHasher` port — so the choice is contained to one adapter file ([`bcrypt-password-hasher.ts`](../backend/src/features/users/infrastructure/services/bcrypt-password-hasher.ts)) and trivially reversible.
+
+**Consequences.** Slightly slower hashing than the native addon (immaterial at this scale — auth endpoints, not a hot loop) in exchange for zero native build dependencies. Swapping to `bcrypt` later is a one-file change behind the port, same as swapping any other adapter.
+
+---
+
+## ADR-0016 — Postgres via Docker Compose, not a hand-written Dockerfile
+
+`2026-08-16` · **Accepted**
+
+**Context.** The database is stock Postgres with no custom image requirements.
+
+**Decision.** [`backend/docker-compose.yml`](../backend/docker-compose.yml) declares a single `db` service on the official `postgres:17-alpine` image, with a named volume and a healthcheck, configured entirely through environment variables (defaulted in the compose file, overridable via `backend/.env`). No custom `Dockerfile`.
+
+**Consequences.** `npm run db:up` / `db:down` / `db:logs` are the whole interface; there is nothing to build or maintain beyond the compose file. If the database ever needs custom initialization (extensions, seed scripts) beyond what `postgres`'s official image's `/docker-entrypoint-initdb.d` convention covers, that is the trigger to add a `Dockerfile` that extends the base image.

@@ -20,6 +20,14 @@ export class NotFoundError extends AppError {
   readonly code = 'NOT_FOUND';
 }
 
+export class ConflictError extends AppError {
+  readonly code = 'CONFLICT';
+}
+
+export class UnauthorizedError extends AppError {
+  readonly code = 'UNAUTHORIZED';
+}
+
 export class UnexpectedError extends AppError {
   readonly code = 'UNEXPECTED_ERROR';
 }

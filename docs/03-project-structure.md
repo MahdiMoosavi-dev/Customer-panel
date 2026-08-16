@@ -1,6 +1,6 @@
 # 03 — Project structure
 
-> Last updated: 2026-08-16
+> Last updated: 2026-08-16 (backend: users + auth features, Prisma, Docker)
 
 ## The monorepo
 
@@ -75,45 +75,78 @@ backend/
 ├── package.json
 ├── nest-cli.json
 ├── tsconfig.json                # strict; "@/*" → "src/*"
-├── tsconfig.build.json
+├── tsconfig.build.json          # rootDir pinned to "src", excludes prisma.config.ts / prisma/**
 ├── eslint.config.mjs            # Nest presets + Prettier + architecture boundary rules
 ├── .prettierrc
 ├── .env.example
+├── docker-compose.yml           # Postgres 17 for local dev — `npm run db:up`
+├── prisma.config.ts             # CLI-only: schema path + DATABASE_URL for migrate/generate
+├── prisma/
+│   ├── schema.prisma            # models — no datasource url, see docs/05-technologies.md
+│   └── migrations/
 ├── test/
 │   ├── app.e2e-spec.ts          # HTTP-level test via supertest
+│   ├── users-auth.e2e-spec.ts   # full users + auth flow against a live database
 │   └── jest-e2e.json
 └── src/
-    ├── main.ts                                  bootstrap: global prefix, CORS, port
+    ├── main.ts                                  bootstrap: global prefix, CORS, port, ValidationPipe
     ├── app.module.ts                            composes feature modules, no logic
     │
-    ├── core/                                    mirror of the frontend's core
-    │   ├── config/env.ts
+    ├── core/                                    mirror of the frontend's core, plus:
+    │   ├── config/env.ts                        now also loads `dotenv/config`
     │   ├── domain/result.ts
-    │   ├── domain/app-error.ts
+    │   ├── domain/app-error.ts                  + ConflictError, UnauthorizedError
+    │   ├── domain/token.ts                       TokenService port + TokenPayload + TOKEN_SERVICE — cross-cutting, not auth-specific
     │   └── index.ts
     │
     ├── shared/
-    │   └── http/to-http-exception.ts            AppError code ➜ HTTP status
+    │   ├── http/to-http-exception.ts            AppError code ➜ HTTP status
+    │   ├── http/jwt-auth.guard.ts                @UseGuards(JwtAuthGuard) — any feature can use this
+    │   ├── http/express.d.ts                     augments Express.Request.user: TokenPayload
+    │   └── prisma/prisma.service.ts, prisma.module.ts   @Global() — the one PrismaClient instance
     │
     └── features/
-        └── greeting/
-            ├── domain/
-            │   ├── entities/greeting.ts
-            │   └── repositories/greeting.repository.ts   interface + GREETING_REPOSITORY token
+        ├── greeting/                             unchanged — see docs/01-overview.md
+        │   └── ...
+        │
+        ├── users/
+        │   ├── domain/
+        │   │   ├── entities/user.ts                          User, NewUser + createUser() invariants
+        │   │   ├── repositories/user.repository.ts             UserRepository port + USER_REPOSITORY token
+        │   │   └── services/password-hasher.ts                 PasswordHasher port + PASSWORD_HASHER token
+        │   ├── application/
+        │   │   ├── dto/{user,create-user,update-user,credentials}.dto.ts
+        │   │   ├── mappers/user.mapper.ts                      strips passwordHash
+        │   │   └── use-cases/
+        │   │       ├── create-user.use-case.ts (+ .spec.ts)
+        │   │       ├── get-users.use-case.ts
+        │   │       ├── get-user-by-id.use-case.ts
+        │   │       ├── update-user.use-case.ts
+        │   │       ├── delete-user.use-case.ts
+        │   │       └── verify-user-credentials.use-case.ts (+ .spec.ts)   exported for `auth`
+        │   ├── infrastructure/
+        │   │   ├── repositories/prisma-user.repository.ts       maps Prisma P2002/P2025 → ConflictError/NotFoundError
+        │   │   ├── services/bcrypt-password-hasher.ts
+        │   │   └── users.module.ts                              composition root
+        │   ├── presentation/
+        │   │   ├── dto/{create-user,update-user}.request.ts     class-validator, implements the app DTO
+        │   │   └── controllers/users.controller.ts
+        │   └── index.ts                                         exports UsersModule, VerifyUserCredentialsUseCase, UserDto
+        │
+        └── auth/                                 no domain/ of its own — TokenService lives in core/, see above
             ├── application/
-            │   ├── dto/greeting.dto.ts
-            │   ├── mappers/greeting.mapper.ts
-            │   ├── use-cases/get-greeting.use-case.ts
-            │   └── use-cases/get-greeting.use-case.spec.ts   unit test with a fake repository
+            │   ├── dto/{login,auth-token}.dto.ts
+            │   └── use-cases/login.use-case.ts                   depends on users' VerifyUserCredentialsUseCase
             ├── infrastructure/
-            │   ├── repositories/static-greeting.repository.ts
-            │   └── greeting.module.ts                    composition root (Nest module)
+            │   ├── services/jwt-token.service.ts                 implements core's TokenService with @nestjs/jwt
+            │   └── auth.module.ts                                @Global() composition root
             ├── presentation/
-            │   └── controllers/greeting.controller.ts
-            └── index.ts
+            │   ├── dto/login.request.ts
+            │   └── controllers/auth.controller.ts
+            └── index.ts                                          exports AuthModule, AuthTokenDto — not the guard, see below
 ```
 
-Note the deliberate symmetry: the two `features/*/` trees differ only where the runtime forces them to — `presentation/views` vs. `presentation/controllers`, and a plain container vs. a Nest module.
+Note the deliberate symmetry between `greeting` and `users`: the two `features/*/` trees differ only where the runtime forces them to. `auth` breaks the pattern in one place on purpose — it has no `domain/` folder, because its one domain concept (the token contract) turned out to be cross-cutting enough to live in `core/` instead. See [backend/README.md](../backend/README.md#the-jwt-guard-lives-in-shared-not-in-featuresauth) and [ADR-0012](08-decisions.md#adr-0012--the-jwt-guard-lives-in-shared-not-in-the-auth-feature) for why — it's not a shortcut, it's what fixed a real circular-import bug.
 
 ## Where does this file go?
 
@@ -128,11 +161,14 @@ Note the deliberate symmetry: the two `features/*/` trees differ only where the 
 | A React component for one feature                         | `features/<name>/presentation/components/`                             |
 | A React component two features both need                  | `frontend/src/shared/ui/`                                              |
 | A controller / route handler                              | `features/<name>/presentation/controllers/`                            |
+| A validated HTTP request body                              | `features/<name>/presentation/dto/*.request.ts` — `implements` the application DTO |
 | A helper every feature may use, with no framework in it    | `core/`                                                                |
 | A helper every feature may use, that touches the framework | `shared/`                                                              |
+| A guard, interceptor, or pipe more than one feature attaches | `shared/http/` — never inside one feature, or a second feature importing it can create a circular module dependency (it happened — see [ADR-0012](08-decisions.md#adr-0012--the-jwt-guard-lives-in-shared-not-in-the-auth-feature)) |
 | A page or route                                           | `frontend/src/app/…/page.tsx` — three lines, rendering a feature view  |
 | A unit test                                               | Next to the file under test, as `*.spec.ts`                            |
 | An HTTP-level test                                        | `backend/test/*.e2e-spec.ts`                                           |
+| A database model                                           | `backend/prisma/schema.prisma`, then `npm run prisma:migrate -w backend` |
 
 ## Rules of thumb
 
@@ -140,3 +176,4 @@ Note the deliberate symmetry: the two `features/*/` trees differ only where the 
 - **A feature owns its whole vertical.** If a change touches only one product concern, it should touch only one folder under `features/`.
 - **Reach for `shared/` only on the second use.** Two features actually needing the same thing is the trigger; anticipating that they might is not.
 - **`core/` stays tiny.** It is for primitives every feature uses. If something in `core/` is used by one feature, it belongs in that feature.
+- **A feature does not need every layer.** `auth` has no `domain/` — its only domain concept turned out to belong in `core/`. Don't create an empty folder for form's sake.
